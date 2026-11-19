@@ -735,3 +735,30 @@ test('the compact status bar is opt-in and stands in for the Cache row and the l
   const card = settingsHtml.indexOf('data-setting-card="compactTelemetryBar" data-checked="false"');
   assert.ok(settingsHtml.indexOf('data-setting-card="showRequestMetrics"') < card && card < settingsHtml.indexOf('data-setting-card="showTurnMetrics"'));
 });
+
+test('the compact status bar can sit at the top of the panel instead of along its lower edge', () => {
+  assert.equal(DEFAULT_SETTINGS.telemetryBarPosition, 'bottom');
+  const dir = mkdtempSync(join(tmpdir(), 'agy-bar-position-'));
+  try {
+    const store = createSettingsStore(join(dir, 'settings.json'));
+    assert.equal(store.update({ telemetryBarPosition: 'top' }).telemetryBarPosition, 'top');
+    assert.equal(store.update({ telemetryBarPosition: 'left' }).telemetryBarPosition, 'top');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+  const ui = createPresentation();
+  assert.equal(ui.appearance({}).telemetryBarPosition, 'bottom');
+  assert.equal(ui.appearance({ telemetryBarPosition: 'top' }).telemetryBarPosition, 'top');
+
+  // At the top the bar leads the panel as a flat row: no dock fill, no cache tint, no hover.
+  const deck = readFileSync(new URL('../agy-capsule/sidecars/agy_capsule/deck_injector.mjs', import.meta.url), 'utf8');
+  const top = '\\[data-compact-telemetry-bar="true"\\]\\[data-telemetry-bar-position="top"\\]';
+  assert.match(deck, new RegExp(`#deck-metrics-strip${top} \\.dk-telemetry-dock \\{[^}]*order: -1;[^}]*background: none;`));
+  assert.match(deck, new RegExp(`#deck-metrics-strip${top} \\.dk-telemetry-dock \\.tb-cell \\{ padding: 0 3px; background: none; \\}`));
+  assert.match(UI_HTML, new RegExp(`body${top} \\.telemetry-dock \\{[^}]*order: -1;[^}]*background: none;`));
+  assert.match(UI_HTML, new RegExp(`body${top} \\.telemetry-dock \\.tb-cell \\{ padding: 0 3px; background: none; \\}`));
+
+  // The choice sits in the bar's own settings card, where it is disabled together with the bar,
+  // and the card's miniature follows it.
+  const settingsHtml = UI_HTML.slice(UI_HTML.indexOf('<section class="settings'));
+  assert.match(settingsHtml, /class="setting-card setting-option-card" data-setting-card="compactTelemetryBar"[^]*?data-pick-setting="telemetryBarPosition" data-pick-value="top"[^]*?data-pick-setting="telemetryBarPosition" data-pick-value="bottom"[^]*?class="setting-preview"/);
+  assert.match(UI_HTML, /body\[data-telemetry-bar-position="top"\] \.pv-tbar-dock \{ order: -1;/);
+});

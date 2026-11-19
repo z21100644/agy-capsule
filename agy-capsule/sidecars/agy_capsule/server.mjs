@@ -18,7 +18,7 @@ import { createUsageHistory } from './usage_history.mjs';
 import { createUsagePresentation } from './usage_ui.mjs';
 
 const settingsStore = createSettingsStore();
-const PANEL_VERSION = 119;
+const PANEL_VERSION = 120;
 const presentation = createPresentation();
 export function getNotifyText(shortcutState, prefs) {
   const t = presentation.dictionaries[prefs?.settingsLanguage] || presentation.dictionaries['zh-CN'];
@@ -642,6 +642,10 @@ const MARKER_OPTIONS = [
   ['square', 'markerSquare', '<span class="seg-ico seg-ico-marker" aria-hidden="true"></span>'],
   ['dot', 'markerDot', '<span class="seg-ico seg-ico-marker seg-ico-dot" aria-hidden="true"></span>'],
 ];
+const BAR_POSITION_OPTIONS = [
+  ['top', 'barTop', '<span data-i18n="barTop"></span>'],
+  ['bottom', 'barBottom', '<span data-i18n="barBottom"></span>'],
+];
 // Column-field editor shown inside the context preview: one row per field
 // (name / value / percent), visible rows first in the saved order, hidden rows
 // struck through at the bottom. Shared with the page script via toString().
@@ -999,6 +1003,7 @@ const UI_HTML = `<!DOCTYPE html>
     .setting-opts-extra { display: inline-flex; }
     .setting-seg { display: inline-flex; flex-shrink: 0; padding: 2px; gap: 2px; border-radius: 6px; background: color-mix(in srgb, var(--foreground, #ebebeb) 6%, transparent); border: 1px solid color-mix(in srgb, var(--foreground, #ebebeb) 12%, transparent); }
     .setting-seg-opt { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 17px; padding: 0; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--muted-foreground, #8e8e93); font: inherit; cursor: pointer; transition: background .18s ease, color .18s ease, border-color .18s ease; }
+    .setting-seg-text .setting-seg-opt { width: auto; padding: 0 7px; font-size: 11.5px; white-space: nowrap; }
     .setting-seg-opt:hover { color: var(--foreground, #ebebeb); }
     .setting-seg-opt[data-active="true"] { background: color-mix(in srgb, var(--foreground, #ebebeb) 14%, var(--card, #222225)); border-color: color-mix(in srgb, var(--foreground, #ebebeb) 18%, transparent); color: #4ea84e; }
     .setting-seg-opt:focus-visible, .pv-field-toggle:focus-visible { outline: 2px solid #388bfd; outline-offset: 1px; }
@@ -1120,6 +1125,9 @@ const UI_HTML = `<!DOCTYPE html>
     .pv-tbar-cache { background: linear-gradient(90deg, color-mix(in srgb, #4ea84e 10%, transparent), transparent); }
     .pv-tbar-cell b { font-weight: 500; color: color-mix(in srgb, var(--foreground, #ebebeb) 92%, transparent); }
     .pv-tbar-u { font-style: normal; font-weight: 400; opacity: .6; }
+    /* The miniature follows the chosen position, which the page carries on its body. */
+    body[data-telemetry-bar-position="top"] .pv-tbar-dock { order: -1; background: none; border-top: 0; border-bottom: 1px solid color-mix(in srgb, var(--border, rgba(142,142,147,.24)) 64%, transparent); }
+    body[data-telemetry-bar-position="top"] .pv-tbar-cache { background: none; }
     /* Speed breathing & cooldown */
     .pv-speed-cap { display: flex; align-items: center; }
     .pv-speed-cap .pv-pill { gap: 5px; }
@@ -1358,6 +1366,22 @@ const UI_HTML = `<!DOCTYPE html>
       }
       .telemetry-dock .tb-single { padding: 6px calc(var(--agy-pad-x, 10px) + 2px); }
     }
+    /* The bar can sit at the top of the context statistics instead: a flat row over a hairline, like
+       the Cache row it stands in for, without the dock's box, tint and hover. */
+    body[data-compact-telemetry-bar="true"][data-telemetry-bar-position="top"] .stats-context { display: flex; flex-direction: column; }
+    body[data-compact-telemetry-bar="true"][data-telemetry-bar-position="top"] .telemetry-dock {
+      order: -1;
+      margin: 0 0 var(--agy-section-gap, 6px);
+      padding-bottom: var(--agy-section-gap, 6px);
+      border: 0;
+      border-bottom: 1px solid color-mix(in srgb, var(--border, rgba(142, 142, 147, 0.24)) 64%, transparent);
+      border-radius: 0;
+      background: none;
+    }
+    body[data-compact-telemetry-bar="true"][data-telemetry-bar-position="top"] .telemetry-dock .tb-cell { padding: 0 3px; background: none; }
+    body[data-compact-telemetry-bar="true"][data-telemetry-bar-position="top"] .telemetry-dock .tb-cell:first-child { justify-content: flex-start; padding-left: 0; }
+    body[data-compact-telemetry-bar="true"][data-telemetry-bar-position="top"] .telemetry-dock .tb-cell:last-child { justify-content: flex-end; padding-right: 0; }
+    body[data-compact-telemetry-bar="true"][data-telemetry-bar-position="top"] .telemetry-dock .tb-single { padding: 0; background: none; }
     @media (prefers-reduced-motion: no-preference) {
       .telemetry-dock .tb-cell { transition: background-color .14s ease; }
     }
@@ -1601,7 +1625,13 @@ const UI_HTML = `<!DOCTYPE html>
     </div>
     ${renderCheckCard({ id: 'setting-highlight-context-hover', key: 'highlightContextHover', checked: DEFAULT_SETTINGS.highlightContextHover })}
     ${renderCheckCard({ id: 'setting-show-request-metrics', helpId: 'request-metrics', key: 'showRequestMetrics', tip: 'requestSectionTip', checked: true })}
-    ${renderCheckCard({ id: 'setting-compact-telemetry-bar', key: 'compactTelemetryBar', checked: DEFAULT_SETTINGS.compactTelemetryBar })}
+    <div class="setting-card setting-option-card" data-setting-card="compactTelemetryBar" data-checked="${DEFAULT_SETTINGS.compactTelemetryBar}">
+      <div class="setting-head setting-pair-head">
+        <div class="setting-pair-item"><label class="setting-check"><input id="setting-compact-telemetry-bar" name="compactTelemetryBar" type="checkbox"${DEFAULT_SETTINGS.compactTelemetryBar ? ' checked' : ''} /><span data-i18n="compactTelemetryBar"></span></label></div>
+        <div class="setting-opts setting-seg-text">${renderSeg('telemetryBarPosition', BAR_POSITION_OPTIONS)}</div>
+      </div>
+      <div class="setting-preview" aria-hidden="true">${PV_CARD_PREVIEW.compactTelemetryBar}</div>
+    </div>
     <div class="setting-card setting-option-card metric-setting" data-setting-card="showTurnMetrics" data-layout-key="turnLayout" data-checked="${DEFAULT_SETTINGS.showTurnMetrics}" data-layout="columns">
       <div class="setting-head setting-pair-head">
         <div class="setting-pair-item"><label class="setting-check"><input id="setting-show-turn-metrics" name="showTurnMetrics" type="checkbox"${DEFAULT_SETTINGS.showTurnMetrics ? ' checked' : ''} aria-describedby="help-turn-metrics" /><span data-i18n="showTurnMetrics"></span></label></div>
@@ -1808,7 +1838,7 @@ const UI_HTML = `<!DOCTYPE html>
       if (speedCard) speedCard.dataset.speedFx = String(prefs.showSpeed !== false && prefs.speedAnimation === true);
       const speedAnimCard = document.querySelector('[data-setting-card="speedAnimation"]');
       if (speedAnimCard) speedAnimCard.dataset.parentOff = String(prefs.showSpeed === false);
-      for (const card of document.querySelectorAll('.setting-option-card')) card.dataset.layout = prefs[card.dataset.layoutKey] === 'rows' ? 'rows' : 'columns';
+      for (const card of document.querySelectorAll('.setting-option-card[data-layout-key]')) card.dataset.layout = prefs[card.dataset.layoutKey] === 'rows' ? 'rows' : 'columns';
       const contextPreview = document.querySelector('[data-preview-group="context"]');
       if (contextPreview) {
         contextPreview.dataset.open = String(prefs.showContextBreakdown !== false);

@@ -86,11 +86,11 @@ function pageMount(d) {
   }
 
   // Upgrade or initialize DOM structure in-place
-  if (root.getAttribute('data-deck-ver') !== '116') {
+  if (root.getAttribute('data-deck-ver') !== '117') {
     release(root);
     root._pinnedGroup = null;
     root.removeAttribute('data-pinned');
-    root.setAttribute('data-deck-ver', '116');
+    root.setAttribute('data-deck-ver', '117');
     root._speedActivity = null;
     root._motionPrev = null;
     root._renderKey = null;
@@ -655,6 +655,21 @@ function pageMount(d) {
         #deck-metrics-strip .dk-telemetry-dock .tb-speed[data-speed-tier="green"] .tb-svg { color: light-dark(#16a34a, #4ea84e); opacity: .9; }
         #deck-metrics-strip .dk-telemetry-dock .tb-speed[data-speed-tier="yellow"] .tb-svg { color: light-dark(#d97706, #d4940a); opacity: .9; }
         #deck-metrics-strip .dk-telemetry-dock .tb-speed[data-speed-tier="red"] .tb-svg { color: light-dark(#dc2626, #e06c75); opacity: .9; }
+        /* The bar can sit at the top of the panel instead: a flat row over a hairline, like the Cache
+           row it stands in for, without the dock's tint and hover. */
+        #deck-metrics-strip[data-compact-telemetry-bar="true"][data-telemetry-bar-position="top"] .dk-ctx-pop > .dk-panel-content { display: flex; flex-direction: column; }
+        #deck-metrics-strip[data-compact-telemetry-bar="true"][data-telemetry-bar-position="top"] .dk-telemetry-dock {
+          order: -1;
+          margin: 0 0 var(--agy-section-gap, 6px);
+          padding-bottom: var(--agy-section-gap, 6px);
+          border-top: 0;
+          border-bottom: 1px solid color-mix(in srgb, var(--border, rgba(142, 142, 147, 0.24)) 64%, transparent);
+          background: none;
+        }
+        #deck-metrics-strip[data-compact-telemetry-bar="true"][data-telemetry-bar-position="top"] .dk-telemetry-dock .tb-cell { padding: 0 3px; background: none; }
+        #deck-metrics-strip[data-compact-telemetry-bar="true"][data-telemetry-bar-position="top"] .dk-telemetry-dock .tb-cell:first-child { justify-content: flex-start; padding-left: 0; }
+        #deck-metrics-strip[data-compact-telemetry-bar="true"][data-telemetry-bar-position="top"] .dk-telemetry-dock .tb-cell:last-child { justify-content: flex-end; padding-right: 0; }
+        #deck-metrics-strip[data-compact-telemetry-bar="true"][data-telemetry-bar-position="top"] .dk-telemetry-dock .tb-single { padding: 0; background: none; }
         @media (prefers-reduced-motion: no-preference) {
           #deck-metrics-strip .dk-telemetry-dock .tb-cell { transition: background-color .14s ease; }
         }
