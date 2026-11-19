@@ -50,6 +50,12 @@ Shows the remaining 5-hour and weekly quotas and their reset countdowns for the 
 - **Request failure capsule**: Appears in red only when a request fails; hover or click it to see the raw error and an explanation in the panel. Reasons shown: quota exhausted, rate limited (429), disconnected, authentication error, service busy and unknown.
 - **Server queue alert**: Appears in amber when waiting for the model's first token during Working exceeds the threshold (default `30s`, configurable `1–999s` at the end of Settings), ticking live while waiting. Scoped to the current turn only, showing `×N` when multiple requests exceed the threshold (e.g. `Queue×2 40s` / `Queue×2`), with per-wait details in its panel. Active local tools and streaming responses do not trigger false alerts.
 
+## Usage history
+
+An optional block at the bottom of the sidebar statistics that adds up the token usage recorded in this computer's conversations. **Everything below is optional.**
+
+- **Token activity (off by default)**: Shows today's, this week's, this month's and all-time usage, and an activity map of the past year that switches between Daily (one cell per day) and Weekly (one cell per week); a darker cell means more usage. A narrow sidebar keeps only the most recent weeks. Point at a cell to see that day's or week's tokens and requests.
+
 ## Language and appearance
 
 - **Settings language**: English, Simplified Chinese, Traditional Chinese. The language of the settings page.
@@ -120,6 +126,7 @@ From the repository folder, run `sh install.sh` to install, `sh update.sh` to up
 - **Turn metrics** start at your latest message; elapsed time includes queueing, waiting and tool execution.
 - **Cache expiry alerts are only a guide**: the cache state (yellow at 3 minutes, expired at 4 by default; configurable in Settings) is estimated locally from the time since the last turn; actual cache hits depend on the server.
 - **Server queue alert**: combines recorded per-turn request TTFTs with live pre-first-token waiting time while working (excluding active local tools and streaming responses), resetting automatically on each new user message.
+- **Usage history** adds up the uncached input, cache reads, cache writes and output that each model request recorded in this computer's conversation databases. It is not a bill: deleted conversations are not counted, and a response stored in more than one conversation file counts once. Days follow the local time zone and weeks start on Monday. Conversations are read only while the option is on and the sidebar statistics are open; the totals stay in memory and are neither written to disk nor sent anywhere.
 
 <details>
 <summary>Details</summary>
@@ -155,6 +162,7 @@ Issues and pull requests are welcome. See the [contribution guide](./CONTRIBUTIN
 
 1. **Inspired by @z21100644 ([PR #1](https://github.com/Lumidarin/agy-capsule/pull/1))**: Thanks for the ideas behind multilingual support, parts of the panel design, click-to-pin, active-model highlighting, generation metrics and speed effects, consistent `K` / `M` token formatting, cache and quota tooltips, context overload alerts, request error classification, and hiding absent quota windows. This version also drew on style isolation, SQLite read caching, incremental CDP updates, installation and maintenance, and Sidecar auto-reload, reimplemented to fit this project. It does not include seven-category context estimates or attachment scanning. Separate settings and display languages, independent appearance controls, the request failure capsule, the new footer's collapse order, turn metrics, and Sidebar interactions were designed separately for this release.
 2. **Inspired by @Krwaby123 ([PR #2](https://github.com/Lumidarin/agy-capsule/pull/2))**: Thanks for reporting quota panel overflow with page-translation extensions and proposing shared column alignment with widths that adapt to longer translations. This version uses a different grid across quota groups and marks percentages and countdowns as not translatable. Chinese countdowns are still available in Settings.
+3. **Inspired by [wycocoyu/agy-context-dashboard](https://github.com/wycocoyu/agy-context-dashboard) (MIT)**: The daily / weekly activity map of the usage history follows the idea of that project's usage window, reimplemented to fit this project: it reads the local conversation databases directly, without calling the local API or keeping a ledger of its own.
 
 ## License
 

@@ -42,6 +42,7 @@ Provides **Statistics** and **Settings** tabs at the top (settings live exclusiv
   - **Breakdown hover highlight**: `false` (pointing at a segment of the progress bar or at a breakdown item keeps that segment and its item lit and dims the rest; CSS only; works in the sidebar and in a pinned footer panel)
   - **Last request**: `true` (shows `TTFT–total duration` range and generation speed)
   - **Turn metrics**: `false`; `columns` (default) or `rows`, `square` (default) or `dot` markers
+  - **Token activity**: `false` (sidebar statistics only: today / this week / this month / all-time usage and a daily or weekly activity map of the past year, added up from the local conversation databases; nothing is read while it is off)
   - **Server queue alert**: `true` with configurable threshold (`queueWarnSec`: `30s`, `1–999`) at the end of Settings
 
 ## Telemetry & Metric Definitions
@@ -53,6 +54,7 @@ Provides **Statistics** and **Settings** tabs at the top (settings live exclusiv
 - **Turn metrics**: Aggregates elapsed wall-clock time (including queueing, waits, and tool execution), request count (recorded retries included; pure preflight/injected responses excluded), `Write`, and `Think` tokens starting from the latest sent user message.
 - **Cache expiry estimate**: The warning / cold status (default `3m` / `4m`, configurable in Settings) is estimated locally from elapsed time since the last recorded step; actual cache hits depend on the server.
 - **Server queue alert**: Combines recorded per-turn request TTFTs with live pre-first-token waits while working (ignoring active local tools and streaming responses), resetting when a new user message starts a new turn.
+- **Usage history**: Sums `input_tokens` (uncached), `cache_read_tokens`, `cache_write_tokens` and `output_tokens` of every recorded model request across `conversations/*.db`, dated in the local time zone by the request's start (`chat_start_metadata.created_at`, or its first step when that is absent); weeks start on Monday. A response stored in several conversation files counts once. A database is read again only after it changed, the event loop gets a turn between reads, and nothing is read unless the option is on and the sidebar statistics are open. A conversation that is not open is read as an immutable file, so no `-wal` / `-shm` files appear beside it; this needs a runtime whose `node:sqlite` accepts `file:` URLs (Node.js 22.15+), and on an older one such conversations are reported as unread instead. Totals stay in memory; deleted conversations are not counted, and the result is not a bill.
 
 ## Install / Update / Uninstall
 
@@ -72,6 +74,7 @@ Run the scripts from the repository root:
 
 - Selected features and visual/engineering ideas (multi-language support, panel visuals, active-model highlighting, click-to-pin, generation speed/effects, cache & quota tooltips, overload alerts, error classification, absent window hiding, style isolation, SQLite snapshot caching, incremental CDP pushes, and install maintenance) were adapted and reimplemented from [z21100644's PR #1](https://github.com/Lumidarin/agy-capsule/pull/1). Separate display/settings languages, independent appearance controls, the third failure capsule, narrow-width fallback order, turn metrics, and sidebar interactions were designed independently; 7-category context estimates and attachment scanning were not adopted.
 - Quota popover overflow under browser/page translation extensions was reported with a proposed fix in [Krwaby123's PR #2](https://github.com/Lumidarin/agy-capsule/pull/2), resolved here via column alignment and no-translate attributes.
+- The usage history's daily / weekly activity map follows the idea of the usage window in [wycocoyu/agy-context-dashboard](https://github.com/wycocoyu/agy-context-dashboard) (MIT), reimplemented here on the local conversation databases instead of the local API and without a ledger of its own.
 
 ## License
 

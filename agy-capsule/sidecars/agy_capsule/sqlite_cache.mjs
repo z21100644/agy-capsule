@@ -1,6 +1,6 @@
 import { statSync } from 'node:fs';
 
-function fileStamp(path) {
+export function fileStamp(path) {
   try {
     const s = statSync(path, { bigint: true });
     return { size: s.size, key: `${s.ino}:${s.size}:${s.mtimeNs}` };
