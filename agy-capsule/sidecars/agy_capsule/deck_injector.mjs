@@ -93,6 +93,8 @@ function pageMount(d) {
     root.setAttribute('data-deck-ver', '110');
     root._speedActivity = null;
     root._motionPrev = null;
+    root._renderKey = null;
+    root._cacheIconSvg = null;
     root.style.cssText = [
       'display: inline-flex',
       'align-items: center',
@@ -786,14 +788,44 @@ function pageMount(d) {
     root.querySelector('[data-el="rowCacheHit"]').addEventListener('mouseenter', () => root._refreshCacheTooltip?.());
   }
 
+  // The expiry ring or bar advances with the clock, so it is painted on its own and never forces
+  // a full pass. The DOM serializes SVG differently, hence the comparison with the last write.
+  const paintCacheIndicator = () => {
+    const dotCached = root.querySelector('[data-el="dotCached"]');
+    if (dotCached && root._cacheIconSvg !== d.cacheIconSvg) dotCached.innerHTML = root._cacheIconSvg = d.cacheIconSvg;
+    const cacheMeter = root.querySelector('[data-el="cacheMeter"]');
+    const cacheMeterFill = root.querySelector('[data-el="cacheMeterFill"]');
+    if (!cacheMeter || !cacheMeterFill) return;
+    const hidden = d.cacheIndicator !== 'bar';
+    if (cacheMeter.hidden !== hidden) cacheMeter.hidden = hidden;
+    if (hidden) return;
+    cacheMeterFill.style.width = d.cacheProgressPct || '0%';
+    cacheMeterFill.style.backgroundColor = d.cacheProgressColor || '';
+  };
+  // Everything else is repainted and re-fitted only when the snapshot, a clock-driven text, the
+  // host's running state or the footer geometry changed since the last pass.
+  const now = Date.now();
+  const cancelBtnVisible = !!footerLeft.parentElement.querySelector('[data-testid="input-cancel-button"]');
+  const waiting = cancelBtnVisible || !!d.turnQueue?.hasPendingPlanner;
+  const alertData = { ...d.contextData, requestError: d.requestError, turnQueue: d.turnQueue };
+  const renderKey = () => JSON.stringify([
+    { ...d, cacheIconSvg: '', cacheProgressPct: '', cacheProgressColor: '' },
+    location.pathname, cancelBtnVisible, root._speedActivity?.coolUntil > now,
+    presentation.alertView(alertData, d.prefs, undefined, now, waiting).label,
+    d.turnMetrics && presentation.turnMetricsText(d.turnMetrics, undefined, now).elapsed,
+    [root, ...footerLeft.parentElement.children].map(el => { const r = el.getBoundingClientRect(); return [Math.round(r.left), Math.round(r.right)]; }),
+  ]);
+  if (footerLeft.contains(host) && root._renderKey === renderKey()) {
+    paintCacheIndicator();
+    return root._renderResult;
+  }
+
   if (!footerLeft.contains(host)) {
     footerLeft.appendChild(host);
   }
   const labels = presentation.apply(root, d.prefs);
   presentation.renderContextTooltips(root, d.contextData, labels);
-  const now = Date.now();
-  const cancelBtnVisible = !!footerLeft.parentElement.querySelector('[data-testid="input-cancel-button"]');
-  const alerts = presentation.renderAlerts(root, { ...d.contextData, requestError: d.requestError, turnQueue: d.turnQueue }, d.prefs, labels, now, cancelBtnVisible || !!d.turnQueue?.hasPendingPlanner);
+  const alerts = presentation.renderAlerts(root, alertData, d.prefs, labels, now, waiting);
   root.querySelector('[data-el="grpQuota"]').hidden = d.cloudPaygo;
   if (root._pinnedGroup?.hidden) {
     root._pinnedGroup.removeAttribute('data-pinned');
@@ -1190,7 +1222,6 @@ function pageMount(d) {
   const segOut = root.querySelector('[data-el="segOut"]');
   const segThink = root.querySelector('[data-el="segThink"]');
   const segTurn0 = root.querySelector('[data-el="segTurn0"]');
-  const dotCached = root.querySelector('[data-el="dotCached"]');
   const ctxIconSvg = root.querySelector('[data-el="ctxIconSvg"]');
 
   if (segRead) segRead.style.width = d.segReadW;
@@ -1198,18 +1229,7 @@ function pageMount(d) {
   if (segThink) segThink.style.width = d.segThinkW;
   if (segTurn0) segTurn0.style.width = d.segTurn0W;
   if (ctxIconSvg) ctxIconSvg.style.color = d.ctxIconColor || '';
-  if (dotCached && dotCached.innerHTML !== d.cacheIconSvg) {
-    dotCached.innerHTML = d.cacheIconSvg;
-  }
-  const cacheMeter = root.querySelector('[data-el="cacheMeter"]');
-  const cacheMeterFill = root.querySelector('[data-el="cacheMeterFill"]');
-  if (cacheMeter && cacheMeterFill) {
-    cacheMeter.hidden = d.cacheIndicator !== 'bar';
-    if (!cacheMeter.hidden) {
-      cacheMeterFill.style.width = d.cacheProgressPct || '0%';
-      cacheMeterFill.style.backgroundColor = d.cacheProgressColor || '';
-    }
-  }
+  paintCacheIndicator();
   const valCacheHitEl = root.querySelector('[data-el="valCacheHitEl"]');
   if (valCacheHitEl) {
     valCacheHitEl.style.color = d.cacheValColor;
@@ -1261,7 +1281,8 @@ function pageMount(d) {
   };
   root._adjustLayout();
 
-  return 'ok:' + modelText;
+  root._renderKey = renderKey();
+  return root._renderResult = 'ok:' + modelText;
 }
 
 function toView(d) {
