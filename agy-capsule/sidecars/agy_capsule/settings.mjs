@@ -72,8 +72,9 @@ export function createSettingsStore(filePath = join(homedir(), '.gemini', 'confi
   let lastStat = '';
   function read() {
     try {
-      const stat = statSync(filePath);
-      const key = `${stat.mtimeMs}:${stat.size}`;
+      // An atomic replacement can keep both size and a coarse mtime; its inode still changes.
+      const stat = statSync(filePath, { bigint: true });
+      const key = `${stat.ino}:${stat.mtimeNs}:${stat.size}`;
       if (key !== lastStat) {
         const raw = JSON.parse(readFileSync(filePath, 'utf8'));
         cached = normalizeSettings(raw);

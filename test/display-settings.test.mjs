@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createSettingsStore, DEFAULT_SETTINGS } from '../agy-capsule/sidecars/agy_capsule/settings.mjs';
@@ -71,6 +71,24 @@ test('individual settings validate values, persist and propagate between sidecar
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('a same-size atomic replacement that keeps its mtime is still detected', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agy-settings-stamp-'));
+  try {
+    const file = join(dir, 'settings.json');
+    const when = new Date(1700000000000);
+    const replace = labelCase => {
+      writeFileSync(file + '.next', JSON.stringify({ labelCase }));
+      utimesSync(file + '.next', when, when);
+      renameSync(file + '.next', file);
+    };
+    replace('lowercase');
+    const store = createSettingsStore(file);
+    assert.equal(store.read().labelCase, 'lowercase');
+    replace('titlecase');
+    assert.equal(store.read().labelCase, 'titlecase');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('removing presets keeps old appearance choices and persists only independent settings', () => {
