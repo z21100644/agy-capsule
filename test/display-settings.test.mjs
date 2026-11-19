@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createSettingsStore, DEFAULT_SETTINGS } from '../agy-capsule/sidecars/agy_capsule/settings.mjs';
 import { createPresentation } from '../agy-capsule/sidecars/agy_capsule/ui.mjs';
-import { toView } from '../agy-capsule/sidecars/agy_capsule/deck_injector.mjs';
+import { layoutSize, toView } from '../agy-capsule/sidecars/agy_capsule/deck_injector.mjs';
 import { UI_HTML } from '../agy-capsule/sidecars/agy_capsule/server.mjs';
 
 test('sidebar is registered as an Extensions auxiliary-pane view', () => {
@@ -438,6 +438,22 @@ test('failure panel shares matched height and quota-style placement; countdown s
   assert.ok(!deck.includes("grp.dataset.el === 'grpError' ? pill.right - width"));
   assert.ok(UI_HTML.includes('<span data-stats-i18n="localizedTimeSample"></span>'));
   assert.ok(!UI_HTML.includes('<span data-i18n="localizedTimeSample"></span>'));
+});
+
+test('popovers are placed and height-matched by layout size, not by a transformed box', () => {
+  const original = globalThis.getComputedStyle;
+  // A scaled panel paints smaller than the room it takes once the transform ends.
+  const panel = { getBoundingClientRect: () => ({ width: 224.58, height: 147.75 }) };
+  try {
+    globalThis.getComputedStyle = () => ({ width: '228px', height: '150px' });
+    assert.equal(layoutSize(panel, 'width'), 228);
+    assert.equal(layoutSize(panel, 'height'), 150);
+    globalThis.getComputedStyle = () => ({ width: 'auto', height: 'auto' });
+    assert.equal(layoutSize(panel, 'width'), 224.58);
+  } finally { globalThis.getComputedStyle = original; }
+  const deck = readFileSync(new URL('../agy-capsule/sidecars/agy_capsule/deck_injector.mjs', import.meta.url), 'utf8');
+  assert.ok(deck.includes("const width = layoutSize(pop, 'width');"));
+  assert.ok(deck.includes("const heights = pops.map(pop => layoutSize(pop, 'height'));"));
 });
 
 test('help dots, disabled option controls, turn preview short labels, and convId validation stay consistent', async () => {

@@ -30,6 +30,11 @@ function findFooterLeft() {
   return best;
 }
 
+// A transform shrinks the box getBoundingClientRect reports, not the room an element needs.
+function layoutSize(el, side) {
+  return parseFloat(getComputedStyle(el)[side]) || el.getBoundingClientRect()[side];
+}
+
 function pageMount(d) {
   if (window.__deckOwnerTs && d.instanceTs && d.instanceTs < window.__deckOwnerTs) {
     return 'superseded';
@@ -726,8 +731,8 @@ function pageMount(d) {
       const limit = `${Math.max(0, maxRight - minLeft)}px`;
       if (root.style.getPropertyValue('--dk-pop-max-width') !== limit) root.style.setProperty('--dk-pop-max-width', limit);
       root._fitPanelHeights?.();
-      const width = pop?.getBoundingClientRect().width;
-      if (!width) return;
+      if (!pop?.getBoundingClientRect().width) return;
+      const width = layoutSize(pop, 'width');
       const pill = grp.querySelector('.dk-pill').getBoundingClientRect();
       const stripLeft = root.getBoundingClientRect().left;
       let left = Math.max(stripLeft, pill.right - width);
@@ -1245,7 +1250,7 @@ function pageMount(d) {
     const previous = pops.map(pop => ({ display: pop.style.display, visibility: pop.style.visibility }));
     root.dataset.panelLayout = 'natural';
     for (const pop of pops) { pop.style.height = ''; pop.style.display = 'block'; pop.style.visibility = 'hidden'; }
-    const heights = pops.map(pop => pop.getBoundingClientRect().height);
+    const heights = pops.map(pop => layoutSize(pop, 'height'));
     root.dataset.panelLayout = 'matched';
     for (const [index, pop] of pops.entries()) {
       pop.style.display = previous[index].display;
@@ -1382,14 +1387,14 @@ function installRuntime(owner, hash) {
 }
 
 export function buildRuntimeBundle(owner = INSTANCE_TS) {
-  const functions = [toView, findFooterLeft, pageMount, installRuntime].map(fn => fn.toString()).join('\n');
+  const functions = [toView, findFooterLeft, layoutSize, pageMount, installRuntime].map(fn => fn.toString()).join('\n');
   const source = getPresentationScript() + '\n' + functions;
   const hash = createHash('sha256').update(source).digest('hex').slice(0, 16);
   const code = `(()=>{const INSTANCE_TS=${Number(owner)};if(globalThis.__agyCapsuleDeck?.owner>INSTANCE_TS)return 'superseded';${getPresentationScript()}\nconst {escapeHtml,appearance,cacheView,contextBreakdown,quotaView,makeRingSvg}=globalThis.__agyCapsulePresentation;\n${functions}\nreturn installRuntime(INSTANCE_TS,${JSON.stringify(hash)});})()`;
   return { code, hash };
 }
 
-export { pageMount, toView };
+export { pageMount, toView, layoutSize };
 
 // The host publishes its HTTP (language server) and HTTPS (composer) ports
 // together. Match the current session, not the newest record on disk.
