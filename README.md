@@ -69,6 +69,8 @@ https://github.com/user-attachments/assets/9f5bf1c6-1284-4e17-a380-defdee83f60c
 
 - **重置倒计时**：紧凑、本地化样式。
 
+- **面板弹出动画（默认关闭）**：面板出现时轻微淡入并上浮；系统开启“减少动画”时不播放。
+
 ## 设置
 
 在对话顶部 **… → Extensions → agy-capsule** 打开侧栏，顶部切换“统计”和“设置”两页。

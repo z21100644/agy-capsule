@@ -78,6 +78,7 @@ export function createPresentation(turnFactory = createTurnPresentation) {
       requestSectionTip: 'Shows Last request (TTFT–total duration and generation speed of the latest recorded call) in panels. Independent of capsule speed.',
       turnSectionTip: 'Aggregates requests, elapsed wall time, write, and thinking tokens from your latest user message to completion.',
       panelLayout: 'Panel height', naturalLayout: 'Natural', matchedLayout: 'Matched',
+      popAnimation: 'Panel pop-in animation',
       density: 'Panel spacing', compact: 'Compact', standard: 'Standard', spacious: 'Spacious',
       quotaIndicator: 'Quota indicator', cacheIndicator: 'Cache indicator', cacheIndicatorIcon: 'Icon', ring: 'Ring', bar: 'Bar',
       labelCase: 'Label casing', lowercase: 'Lowercase', titlecase: 'Title case',
@@ -161,6 +162,7 @@ export function createPresentation(turnFactory = createTurnPresentation) {
       requestSectionTip: '在面板展示最近一次请求的 TTFT–总耗时与生成速度，与底栏胶囊独立。',
       turnSectionTip: '从最近一条用户消息到结束，按整轮累计请求数、耗时、写入与思考。',
       panelLayout: '面板高度', naturalLayout: '自然高度', matchedLayout: '对齐高度',
+      popAnimation: '面板弹出动画',
       density: '面板间距', compact: '紧凑', standard: '标准', spacious: '舒展',
       quotaIndicator: '额度图形', cacheIndicator: '缓存图形', cacheIndicatorIcon: '图标', ring: '圆环', bar: '进度条',
       labelCase: '面板大小写', lowercase: '全小写', titlecase: '首字母大写',
@@ -244,6 +246,7 @@ export function createPresentation(turnFactory = createTurnPresentation) {
       requestSectionTip: '於面板展示最近一次請求的 TTFT–總耗時與生成速度，與底欄膠囊獨立。',
       turnSectionTip: '從最近一條使用者訊息到結束，依整輪累計請求數、耗時、寫入與思考。',
       panelLayout: '面板高度', naturalLayout: '自然高度', matchedLayout: '對齊高度',
+      popAnimation: '面板彈出動畫',
       density: '面板間距', compact: '緊湊', standard: '標準', spacious: '舒展',
       quotaIndicator: '額度圖形', cacheIndicator: '快取圖形', cacheIndicatorIcon: '圖示', ring: '圓環', bar: '進度條',
       labelCase: '面板大小寫', lowercase: '全小寫', titlecase: '首字母大寫',
@@ -595,7 +598,7 @@ export function createPresentation(turnFactory = createTurnPresentation) {
     return view;
   }
   function appearance(prefs = {}) {
-    return { panelLayout: prefs.panelLayout || 'natural', density: prefs.density || 'compact', quotaIndicator: prefs.quotaIndicator || 'ring', cacheIndicator: ['ring', 'bar'].includes(prefs.cacheIndicator) ? prefs.cacheIndicator : 'icon', labelCase: prefs.labelCase || 'lowercase', resetFormat: prefs.resetFormat === 'localized' ? 'localized' : 'compact', contextLayout: prefs.contextLayout === 'rows' ? 'rows' : 'columns', turnLayout: prefs.turnLayout === 'rows' ? 'rows' : 'columns', contextMarker: prefs.contextMarker === 'dot' ? 'dot' : 'square', turnMarker: prefs.turnMarker === 'dot' ? 'dot' : 'square', showContextBreakdown: String(prefs.showContextBreakdown !== false), columnLabel: String(prefs.columnLabel !== false), columnValue: String(prefs.columnValue !== false), columnPercent: String(prefs.columnPercent === true), showQuotaDividers: String(prefs.showQuotaDividers !== false) };
+    return { panelLayout: prefs.panelLayout || 'natural', density: prefs.density || 'compact', quotaIndicator: prefs.quotaIndicator || 'ring', cacheIndicator: ['ring', 'bar'].includes(prefs.cacheIndicator) ? prefs.cacheIndicator : 'icon', labelCase: prefs.labelCase || 'lowercase', resetFormat: prefs.resetFormat === 'localized' ? 'localized' : 'compact', contextLayout: prefs.contextLayout === 'rows' ? 'rows' : 'columns', turnLayout: prefs.turnLayout === 'rows' ? 'rows' : 'columns', contextMarker: prefs.contextMarker === 'dot' ? 'dot' : 'square', turnMarker: prefs.turnMarker === 'dot' ? 'dot' : 'square', showContextBreakdown: String(prefs.showContextBreakdown !== false), columnLabel: String(prefs.columnLabel !== false), columnValue: String(prefs.columnValue !== false), columnPercent: String(prefs.columnPercent === true), showQuotaDividers: String(prefs.showQuotaDividers !== false), popAnimation: String(prefs.popAnimation === true) };
   }
   function formatReset(isoStr, prefs = {}, now = Date.now()) {
     if (!isoStr) return '';
@@ -648,7 +651,7 @@ export function createPresentation(turnFactory = createTurnPresentation) {
     return t;
   }
   const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  return { version: 69, dictionaries, locale, systemLocale, apply, appearance, formatReset, escapeHtml, formatTokens, cacheThresholds, makeCacheRingSvg, cacheTooltip, cacheView, contextBreakdown, contextTooltips, renderContextTooltips, quotaTooltip, applyQuotaTooltips, quotaColor, makeRingSvg, formatGroupTitle, formatBucketLabel, activeGroupColor, quotaView, alertView, renderAlerts, generationText, generationMarkup, renderGeneration, ...turnMethods };
+  return { version: 70, dictionaries, locale, systemLocale, apply, appearance, formatReset, escapeHtml, formatTokens, cacheThresholds, makeCacheRingSvg, cacheTooltip, cacheView, contextBreakdown, contextTooltips, renderContextTooltips, quotaTooltip, applyQuotaTooltips, quotaColor, makeRingSvg, formatGroupTitle, formatBucketLabel, activeGroupColor, quotaView, alertView, renderAlerts, generationText, generationMarkup, renderGeneration, ...turnMethods };
 }
 
-export const getPresentationScript = () => `if (globalThis.__agyCapsulePresentation?.version !== 69) globalThis.__agyCapsulePresentation = (${createPresentation.toString()})(${createTurnPresentation.toString()});`;
+export const getPresentationScript = () => `if (globalThis.__agyCapsulePresentation?.version !== 70) globalThis.__agyCapsulePresentation = (${createPresentation.toString()})(${createTurnPresentation.toString()});`;

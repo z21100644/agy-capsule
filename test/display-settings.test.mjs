@@ -475,6 +475,20 @@ test('popovers are placed and height-matched by layout size, not by a transforme
   assert.ok(deck.includes("const heights = pops.map(pop => layoutSize(pop, 'height'));"));
 });
 
+test('the panel pop-in is opt-in and is never declared under reduced motion', () => {
+  assert.equal(DEFAULT_SETTINGS.popAnimation, false);
+  const ui = createPresentation();
+  const root = { dataset: {}, style: { setProperty() {}, getPropertyValue: () => '', removeProperty() {} }, querySelector: () => null, querySelectorAll: () => [] };
+  ui.apply(root, { language: 'en' });
+  assert.equal(root.dataset.popAnimation, 'false');
+  ui.apply(root, { language: 'en', popAnimation: true });
+  assert.equal(root.dataset.popAnimation, 'true');
+  const deck = readFileSync(new URL('../agy-capsule/sidecars/agy_capsule/deck_injector.mjs', import.meta.url), 'utf8');
+  // A single rule starts the animation: scoped to the setting, inside the no-preference query.
+  assert.match(deck, /@media \(prefers-reduced-motion: no-preference\) \{\s*#deck-metrics-strip\[data-pop-animation="true"\] \.dk-pop \{[^}]*animation: dk-pop-in [^}]*\}\s*\}/);
+  assert.equal(deck.match(/animation: dk-pop-in/g).length, 1);
+});
+
 test('help dots, disabled option controls, turn preview short labels, and convId validation stay consistent', async () => {
   const settingsHtml = UI_HTML.slice(UI_HTML.indexOf('<section class="settings'));
   assert.equal((settingsHtml.match(/<span class="setting-help-dot" aria-hidden="true">\?<\/span>/g) || []).length, 4);

@@ -16,7 +16,7 @@ import { installAsyncHostRoutes, installEpipeGuard } from './host_bridge.mjs';
 import { createCdpNoticeManager } from './cdp_notice.mjs';
 
 const settingsStore = createSettingsStore();
-const PANEL_VERSION = 112;
+const PANEL_VERSION = 113;
 const presentation = createPresentation();
 export function getNotifyText(shortcutState, prefs) {
   const t = presentation.dictionaries[prefs?.settingsLanguage] || presentation.dictionaries['zh-CN'];
@@ -1256,6 +1256,7 @@ const UI_HTML = `<!DOCTYPE html>
       ['compact', 'compactTime', '4h 55m'],
       ['localized', 'localizedTime', '<span data-stats-i18n="localizedTimeSample"></span>'],
     ])}
+    ${renderCheckCard({ id: 'setting-pop-animation', key: 'popAnimation', checked: DEFAULT_SETTINGS.popAnimation })}
 
     <div class="settings-scope" data-settings-scope="features" data-i18n="featuresSection"></div>
     ${renderCheckCard({ id: 'setting-highlight-active-model', key: 'highlightActiveModel', checked: false })}

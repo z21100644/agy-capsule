@@ -86,11 +86,11 @@ function pageMount(d) {
   }
 
   // Upgrade or initialize DOM structure in-place
-  if (root.getAttribute('data-deck-ver') !== '111') {
+  if (root.getAttribute('data-deck-ver') !== '112') {
     release(root);
     root._pinnedGroup = null;
     root.removeAttribute('data-pinned');
-    root.setAttribute('data-deck-ver', '111');
+    root.setAttribute('data-deck-ver', '112');
     root._speedActivity = null;
     root._motionPrev = null;
     root._renderKey = null;
@@ -277,6 +277,11 @@ function pageMount(d) {
         #deck-metrics-strip .dk-grp[data-pinned="true"] .dk-pop { display: block; pointer-events: auto; }
         #deck-metrics-strip[data-pinned] .dk-grp:not([data-pinned="true"]):hover .dk-pop { display: none; }
         #deck-metrics-strip .dk-grp[data-dismissed="true"] .dk-pop { display: none; }
+        /* Optional pop-in, declared only where motion is welcome: reduced motion keeps panels instant. */
+        @keyframes dk-pop-in { from { opacity: 0; transform: translateY(3px) scale(.985); } }
+        @media (prefers-reduced-motion: no-preference) {
+          #deck-metrics-strip[data-pop-animation="true"] .dk-pop { transform-origin: 50% 100%; animation: dk-pop-in .13s cubic-bezier(.22, 1, .36, 1); }
+        }
         /* Context Popover (matches plugin UI) */
         #deck-metrics-strip .dk-ctx-pop {
           width: 228px;

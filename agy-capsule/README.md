@@ -26,6 +26,7 @@ Provides **Statistics** and **Settings** tabs at the top (settings live exclusiv
   - **Quota indicator**: `ring` (default) or `bar`
   - **Cache indicator**: `icon` (default), `ring`, or `bar` (linear progress over elapsed idle time: green → yellow → full red)
   - **Reset countdown**: `compact` (default) or `localized`
+  - **Panel pop-in animation**: `false` (panels fade and rise slightly as they open; never plays while the system asks for reduced motion)
 - **Features** (unified section):
   - **Highlight active model**: `false` (dims non-active quota pools when enabled)
   - **Hide absent quota windows**: `true` (hides empty windows such as Argon's missing 5h window on AI Pro)

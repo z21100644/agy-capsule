@@ -69,6 +69,8 @@ Shows the remaining 5-hour and weekly quotas and their reset countdowns for the 
 
 - **Reset countdown**: Compact, localized.
 
+- **Panel pop-in animation (off by default)**: Panels fade and rise slightly as they open. It never plays while the system asks for reduced motion.
+
 ## Settings
 
 Open **… → Extensions → agy-capsule** from the conversation header, then switch between the Statistics and Settings tabs at the top.
