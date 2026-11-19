@@ -86,11 +86,11 @@ function pageMount(d) {
   }
 
   // Upgrade or initialize DOM structure in-place
-  if (root.getAttribute('data-deck-ver') !== '113') {
+  if (root.getAttribute('data-deck-ver') !== '114') {
     release(root);
     root._pinnedGroup = null;
     root.removeAttribute('data-pinned');
-    root.setAttribute('data-deck-ver', '113');
+    root.setAttribute('data-deck-ver', '114');
     root._speedActivity = null;
     root._motionPrev = null;
     root._renderKey = null;
@@ -350,6 +350,10 @@ function pageMount(d) {
           font-size: 13.5px;
           white-space: nowrap;
         }
+        /* Optional hit-rate ring: next to the number, or in its place. */
+        #deck-metrics-strip .dk-cache-hit { display: inline-flex; align-items: center; }
+        #deck-metrics-strip .dk-cache-hit:empty,
+        #deck-metrics-strip[data-cache-hit-format="ring"] .dk-cache-pct { display: none; }
         #deck-metrics-strip .dk-cache-k {
           text-align: right;
           color: var(--muted-foreground, #8e8e93);
@@ -601,7 +605,7 @@ function pageMount(d) {
         <div class="dk-pop dk-ctx-pop">
           <div class="dk-panel-content">
           <div class="dk-cache-bar" data-el="rowCacheHit">
-            <div class="dk-cache-left"><span data-i18n="cache">Cache</span><span class="dk-cache-pct" data-k="valCacheHit" data-el="valCacheHitEl">0%</span><span class="dk-dot" data-el="dotCached" style="display:inline-flex;align-items:center;justify-content:center;background:transparent"></span></div>
+            <div class="dk-cache-left"><span data-i18n="cache">Cache</span><span class="dk-cache-pct" data-k="valCacheHit" data-el="valCacheHitEl">0%</span><span class="dk-cache-hit" data-el="cacheHitRing"></span><span class="dk-dot" data-el="dotCached" style="display:inline-flex;align-items:center;justify-content:center;background:transparent"></span></div>
             <span class="dk-cache-meter" data-el="cacheMeter" hidden><span data-el="cacheMeterFill"></span></span>
             <div class="dk-cache-k" data-k="valCacheHitK"></div>
           </div>
@@ -1254,6 +1258,13 @@ function pageMount(d) {
   if (valCacheHitKEl) {
     valCacheHitKEl.style.color = d.cacheValColor;
   }
+  // The hit-rate ring stands for the number, so it takes the number's color and dimming.
+  const cacheHitRing = root.querySelector('[data-el="cacheHitRing"]');
+  if (cacheHitRing) {
+    cacheHitRing.innerHTML = d.cacheHitRingSvg;
+    cacheHitRing.style.color = d.cacheValColor;
+    cacheHitRing.style.opacity = d.cacheValOp;
+  }
 
   motion('speed', pillSpeed, text => { speedValue.textContent = text.trim(); });
   motion('error', root.querySelector('[data-el="grpError"]'));
@@ -1302,7 +1313,7 @@ function pageMount(d) {
 function toView(d) {
   const ctx = contextBreakdown(d);
   const cache = cacheView(d, d.prefs);
-  const { iconSvg: cacheIconSvg, valColor: cacheValColor, valDeco: cacheValDeco, valOp: cacheValOp, text: valCacheHit, countdown: valCacheHitK, ctxIconColor, indicator: cacheIndicator, progressPct: cacheProgressPct, progressColor: cacheProgressColor } = cache;
+  const { iconSvg: cacheIconSvg, valColor: cacheValColor, valDeco: cacheValDeco, valOp: cacheValOp, text: valCacheHit, countdown: valCacheHitK, ctxIconColor, indicator: cacheIndicator, progressPct: cacheProgressPct, progressColor: cacheProgressColor, hitRingSvg: cacheHitRingSvg } = cache;
 
   const quotaGroups = quotaView(d.quotaGroups, d.prefs);
   const quotaSummaryGroups = quotaGroups.map(({ title, rawName, modelsInGroup, q5h, qWk }) => ({ title, rawName, modelsInGroup, q5h, qWk }));
@@ -1347,6 +1358,7 @@ function toView(d) {
     cacheProgressPct,
     cacheProgressColor,
     cacheIconSvg,
+    cacheHitRingSvg,
     cacheValColor,
     cacheValDeco,
     cacheValOp,

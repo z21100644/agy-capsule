@@ -26,6 +26,7 @@ Provides **Statistics** and **Settings** tabs at the top (settings live exclusiv
   - **Label casing**: `lowercase` (default) or `titlecase`
   - **Quota indicator**: `ring` (default) or `bar`
   - **Cache indicator**: `icon` (default), `ring`, or `bar` (linear progress over elapsed idle time: green → yellow → full red)
+  - **Cache hit rate**: `percent` (default), `ring`, or `both` (a ring whose arc is the hit rate replaces the percentage in the Cache row or sits next to it; independent of the expiry-progress Cache indicator)
   - **Reset countdown**: `compact` (default) or `localized`
   - **Panel pop-in animation**: `false` (panels fade and rise slightly as they open; never plays while the system asks for reduced motion)
 - **Features** (unified section):

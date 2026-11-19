@@ -612,3 +612,45 @@ test('cache warning thresholds, cache indicator (icon/ring/bar) and queue warnin
   assert.match(UI_HTML, /\.setting-threshold-card\[data-checked="false"\] \.setting-thresholds \{ opacity: \.42; pointer-events: none; \}/);
   assert.match(UI_HTML, /select\.addEventListener\('input', \(\) => \{/);
 });
+
+test('the cache hit rate can be drawn as a ring that replaces the percentage or sits next to it', () => {
+  assert.equal(DEFAULT_SETTINGS.cacheHitFormat, 'percent');
+  const dir = mkdtempSync(join(tmpdir(), 'agy-cache-hit-'));
+  try {
+    const store = createSettingsStore(join(dir, 'settings.json'));
+    assert.equal(store.update({ cacheHitFormat: 'both' }).cacheHitFormat, 'both');
+    assert.equal(store.update({ cacheHitFormat: 'gauge' }).cacheHitFormat, 'both');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+
+  const ui = createPresentation();
+  const now = 1700000000000;
+  const data = { contextTokens: 128000, cachedIn: 96000, lastStepEpochMs: now };
+  assert.equal(ui.cacheView(data, {}, now).hitRingSvg, '', 'the default draws no ring');
+
+  // Three quarters of the r=6.5 circle (40.84) are drawn; alone, the ring carries the number as its name.
+  const ring = ui.cacheView(data, { cacheHitFormat: 'ring' }, now);
+  assert.match(ring.hitRingSvg, /role="img" aria-label="75%"/);
+  assert.match(ring.hitRingSvg, /stroke="currentColor"[^>]*stroke-dasharray="40\.84" stroke-dashoffset="10\.21"/);
+  assert.equal(ring.text, '75%');
+  const both = ui.cacheView(data, { cacheHitFormat: 'both' }, now);
+  assert.doesNotMatch(both.hitRingSvg, /aria-label/);
+  assert.match(both.hitRingSvg, /stroke-dashoffset="10\.21"/);
+  assert.doesNotMatch(ui.cacheView({ ...data, cachedIn: 0 }, { cacheHitFormat: 'ring' }, now).hitRingSvg, /stroke-dashoffset/, 'a 0% ring has no arc');
+
+  // It does not move with the clock and leaves the expiry indicator alone, which keeps its own ring.
+  const later = ui.cacheView(data, { cacheHitFormat: 'both', cacheIndicator: 'ring' }, now + 120000);
+  assert.equal(later.hitRingSvg, both.hitRingSvg);
+  assert.match(later.iconSvg, /stroke="#4ea84e"/);
+  assert.equal(ui.cacheView(data, { cacheIndicator: 'ring' }, now + 120000).iconSvg, later.iconSvg);
+  assert.equal(toView({ ...data, prefs: { cacheHitFormat: 'ring' } }).cacheHitRingSvg, ring.hitRingSvg);
+
+  // Only the ring-only choice hides the number, in the footer panel and in the sidebar.
+  assert.equal(ui.appearance({}).cacheHitFormat, 'percent');
+  assert.equal(ui.appearance({ cacheHitFormat: 'ring' }).cacheHitFormat, 'ring');
+  const deck = readFileSync(new URL('../agy-capsule/sidecars/agy_capsule/deck_injector.mjs', import.meta.url), 'utf8');
+  assert.match(deck, /#deck-metrics-strip\[data-cache-hit-format="ring"\] \.dk-cache-pct \{ display: none; \}/);
+  assert.match(UI_HTML, /body\[data-cache-hit-format="ring"\] \.cache-pct \{ display: none; \}/);
+  const settingsHtml = UI_HTML.slice(UI_HTML.indexOf('<section class="settings'));
+  assert.ok(settingsHtml.indexOf('data-setting-card="cacheIndicator"') < settingsHtml.indexOf('data-setting-card="cacheHitFormat"'));
+  assert.ok(settingsHtml.indexOf('data-setting-card="cacheHitFormat"') < settingsHtml.indexOf('data-settings-scope="features"'));
+});

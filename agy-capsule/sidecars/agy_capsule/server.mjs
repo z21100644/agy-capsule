@@ -16,7 +16,7 @@ import { installAsyncHostRoutes, installEpipeGuard } from './host_bridge.mjs';
 import { createCdpNoticeManager } from './cdp_notice.mjs';
 
 const settingsStore = createSettingsStore();
-const PANEL_VERSION = 114;
+const PANEL_VERSION = 115;
 const presentation = createPresentation();
 export function getNotifyText(shortcutState, prefs) {
   const t = presentation.dictionaries[prefs?.settingsLanguage] || presentation.dictionaries['zh-CN'];
@@ -478,6 +478,8 @@ const PV_SVG = {
   warn: '<svg class="pv-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="12" cy="12" r="9"/><path d="M12 7v6"/><circle cx="12" cy="17" r=".8" fill="currentColor"/></svg>',
   check: '<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0"><polyline points="2 6.5 4.8 9.2 10 3"/></svg>',
   ring: '<svg width="13" height="13" viewBox="0 0 18 18" style="transform:rotate(-90deg);flex-shrink:0"><circle cx="9" cy="9" r="6.5" fill="none" stroke="rgba(142,142,147,0.28)" stroke-width="2.4"/><circle cx="9" cy="9" r="6.5" fill="none" stroke="#4ea84e" stroke-width="2.4" stroke-linecap="round" stroke-dasharray="40.84" stroke-dashoffset="6.1"/></svg>',
+  // The real hit-rate ring, so the swatches cannot drift from what the panels draw.
+  hitRing: presentation.makeCacheRingSvg(.78, 'currentColor', 13),
 };
 
 const PV_CARD_PREVIEW = {
@@ -676,6 +678,10 @@ const UI_HTML = `<!DOCTYPE html>
       font-size: 13.5px;
       white-space: nowrap;
     }
+    /* Optional hit-rate ring: next to the number, or in its place. */
+    .cache-hit { display: inline-flex; align-items: center; }
+    .cache-hit:empty,
+    body[data-cache-hit-format="ring"] .cache-pct { display: none; }
     .cache-k {
       text-align: right;
       color: var(--muted-foreground, #8e8e93);
@@ -1168,7 +1174,7 @@ const UI_HTML = `<!DOCTYPE html>
     <div class="stats-layout">
       <section class="stats-context">
         <div class="cache-bar" id="row-cached">
-          <div class="cache-left"><span data-i18n="cache">Cache</span><span class="cache-pct" id="val-cache-hit">0%</span><span class="dot" id="dot-cached" style="display:inline-flex;align-items:center;justify-content:center;background:transparent"></span></div>
+          <div class="cache-left"><span data-i18n="cache">Cache</span><span class="cache-pct" id="val-cache-hit">0%</span><span class="cache-hit" id="cache-hit-ring"></span><span class="dot" id="dot-cached" style="display:inline-flex;align-items:center;justify-content:center;background:transparent"></span></div>
           <span class="cache-meter" id="cache-meter" hidden><span id="cache-meter-fill"></span></span>
           <div class="cache-k" id="val-cache-hit-k"></div>
         </div>
@@ -1255,6 +1261,11 @@ const UI_HTML = `<!DOCTYPE html>
       ['icon', 'cacheIndicatorIcon', PV_SVG.check],
       ['ring', 'ring', PV_SVG.ring],
       ['bar', 'bar', '<span class="pv-ico-bar"><i></i></span>'],
+    ])}
+    ${renderPickCard('cacheHitFormat', [
+      ['percent', 'cacheHitPercent', '78%'],
+      ['ring', 'ring', PV_SVG.hitRing],
+      ['both', 'cacheHitBoth', '78%' + PV_SVG.hitRing],
     ])}
     ${renderPickCard('resetFormat', [
       ['compact', 'compactTime', '4h 55m'],
@@ -1757,6 +1768,13 @@ const UI_HTML = `<!DOCTYPE html>
         if (valCacheHitKEl) {
           valCacheHitKEl.style.color = cache.valColor || 'var(--muted-foreground, #8e8e93)';
           valCacheHitKEl.textContent = cache.countdown;
+        }
+        // The hit-rate ring stands for the number, so it takes the number's color and dimming.
+        const cacheHitRingEl = document.getElementById('cache-hit-ring');
+        if (cacheHitRingEl) {
+          cacheHitRingEl.innerHTML = cache.hitRingSvg;
+          cacheHitRingEl.style.color = cache.valColor;
+          cacheHitRingEl.style.opacity = cache.valOp;
         }
         document.getElementById('row-cached').title = presentation.cacheTooltip(d, labels, Date.now(), prefs);
 

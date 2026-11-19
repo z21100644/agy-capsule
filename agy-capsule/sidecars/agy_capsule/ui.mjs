@@ -82,6 +82,7 @@ export function createPresentation(turnFactory = createTurnPresentation) {
       popAnimation: 'Panel pop-in animation',
       density: 'Panel spacing', compact: 'Compact', standard: 'Standard', spacious: 'Spacious',
       quotaIndicator: 'Quota indicator', cacheIndicator: 'Cache indicator', cacheIndicatorIcon: 'Icon', ring: 'Ring', bar: 'Bar',
+      cacheHitFormat: 'Cache hit rate', cacheHitPercent: 'Percent', cacheHitBoth: 'Percent and ring',
       labelCase: 'Label casing', lowercase: 'Lowercase', titlecase: 'Title case',
       contextLayout: 'Context breakdown', turnLayout: 'Turn metrics style', layoutColumns: 'Columns', layoutRows: 'Rows', contextMarker: 'Context marker', turnMarker: 'Turn marker', showContextBreakdown: 'Context breakdown', markerSquare: 'Square', markerDot: 'Dot',
       columnLabel: 'Names in columns', columnValue: 'Values in columns', columnPercent: 'Percentages in columns', fieldName: 'Name', fieldValue: 'Value', fieldPercent: '%', fieldDragTip: 'Drag to reorder; the switch hides or shows this line.',
@@ -167,6 +168,7 @@ export function createPresentation(turnFactory = createTurnPresentation) {
       popAnimation: '面板弹出动画',
       density: '面板间距', compact: '紧凑', standard: '标准', spacious: '舒展',
       quotaIndicator: '额度图形', cacheIndicator: '缓存图形', cacheIndicatorIcon: '图标', ring: '圆环', bar: '进度条',
+      cacheHitFormat: '缓存命中率', cacheHitPercent: '百分比', cacheHitBoth: '百分比和圆环',
       labelCase: '面板大小写', lowercase: '全小写', titlecase: '首字母大写',
       contextLayout: '上下文明细', turnLayout: '本轮统计样式', layoutColumns: '竖线', layoutRows: '横条', contextMarker: '上下文标记', turnMarker: '本轮标记', showContextBreakdown: '上下文明细', markerSquare: '方块', markerDot: '圆点',
       columnLabel: '竖线显示名称', columnValue: '竖线显示数值', columnPercent: '竖线显示百分比', fieldName: '名称', fieldValue: '数值', fieldPercent: '百分比', fieldDragTip: '拖动调整顺序，开关控制这一行显示或隐藏。',
@@ -252,6 +254,7 @@ export function createPresentation(turnFactory = createTurnPresentation) {
       popAnimation: '面板彈出動畫',
       density: '面板間距', compact: '緊湊', standard: '標準', spacious: '舒展',
       quotaIndicator: '額度圖形', cacheIndicator: '快取圖形', cacheIndicatorIcon: '圖示', ring: '圓環', bar: '進度條',
+      cacheHitFormat: '快取命中率', cacheHitPercent: '百分比', cacheHitBoth: '百分比和圓環',
       labelCase: '面板大小寫', lowercase: '全小寫', titlecase: '首字母大寫',
       contextLayout: '上下文明細', turnLayout: '本輪統計樣式', layoutColumns: '豎線', layoutRows: '橫條', contextMarker: '上下文標記', turnMarker: '本輪標記', showContextBreakdown: '上下文明細', markerSquare: '方塊', markerDot: '圓點',
       columnLabel: '豎線顯示名稱', columnValue: '豎線顯示數值', columnPercent: '豎線顯示百分比', fieldName: '名稱', fieldValue: '數值', fieldPercent: '百分比', fieldDragTip: '拖動調整順序，開關控制這一行顯示或隱藏。',
@@ -293,13 +296,13 @@ export function createPresentation(turnFactory = createTurnPresentation) {
     if (coldMin <= warnMin) coldMin = Math.min(999, warnMin + 1);
     return { warnMin, coldMin, warnSec: warnMin * 60, coldSec: coldMin * 60 };
   }
-  function makeCacheRingSvg(progress, color, size = 14) {
+  function makeCacheRingSvg(progress, color, size = 14, label = '') {
     const clamped = Math.max(0, Math.min(1, Number(progress || 0)));
     const r = 6.5;
     const c = 2 * Math.PI * r;
     const offset = c * (1 - clamped);
     return (
-      '<svg width="' + size + '" height="' + size + '" viewBox="0 0 18 18" style="transform: rotate(-90deg); flex-shrink: 0;">' +
+      '<svg width="' + size + '" height="' + size + '" viewBox="0 0 18 18"' + (label ? ' role="img" aria-label="' + label + '"' : '') + ' style="transform: rotate(-90deg); flex-shrink: 0;">' +
       '<circle cx="9" cy="9" r="' + r + '" fill="none" stroke="rgba(142,142,147,0.28)" stroke-width="2.4"/>' +
       (clamped > 0
         ? '<circle cx="9" cy="9" r="' + r + '" fill="none" stroke="' + color + '" stroke-width="2.4" stroke-linecap="round" ' +
@@ -327,6 +330,10 @@ export function createPresentation(turnFactory = createTurnPresentation) {
     const warn = prefs?.showCacheWarnings !== false;
     const { warnSec, coldSec } = cacheThresholds(prefs);
     const indicator = ['ring', 'bar'].includes(prefs?.cacheIndicator) ? prefs.cacheIndicator : 'icon';
+    // Optional ring for the hit rate itself, in the number's place or next to it. It is separate from
+    // the expiry indicator above; standing alone, it carries the number as its accessible name.
+    const hitFormat = ['ring', 'both'].includes(prefs?.cacheHitFormat) ? prefs.cacheHitFormat : 'percent';
+    const hitRingSvg = hitFormat === 'percent' ? '' : makeCacheRingSvg(hitPct / 100, 'currentColor', 14, hitFormat === 'ring' ? hitPct + '%' : '');
     const ts = Number(data.lastStepEpochMs);
     const hasAge = ctx > 0 && Number.isFinite(ts) && ts > 0;
     const elapsedSec = warn && hasAge ? Math.max(0, (nowMs - ts) / 1000) : 0;
@@ -340,7 +347,7 @@ export function createPresentation(turnFactory = createTurnPresentation) {
         : '<svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="#e06c75" stroke-width="2" stroke-linecap="round"><line x1="2.2" y1="2.2" x2="9.8" y2="9.8"/><line x1="9.8" y1="2.2" x2="2.2" y2="9.8"/></svg>';
       return {
         status: 'cold', indicator, progress: 1, progressPct: '100%', progressColor,
-        iconSvg,
+        iconSvg, hitRingSvg,
         valColor: '', valDeco: 'line-through', valOp: '0.5', text: hitPct + '%', countdown: '',
         ctxIconColor: 'rgba(208, 122, 128, 0.88)',
       };
@@ -353,7 +360,7 @@ export function createPresentation(turnFactory = createTurnPresentation) {
         : '<svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="#d4940a" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="4.8"/><polyline points="6 3.5 6 6 7.8 7.2"/></svg>';
       return {
         status: 'warning', indicator, progress, progressPct, progressColor,
-        iconSvg,
+        iconSvg, hitRingSvg,
         valColor: '#d4940a', valDeco: 'none', valOp: '1', text: hitPct + '%', countdown: '~' + remMin + 'm',
         ctxIconColor: 'rgba(206, 168, 92, 0.88)',
       };
@@ -364,7 +371,7 @@ export function createPresentation(turnFactory = createTurnPresentation) {
       : '<svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="2 6.5 4.8 9.2 10 3"/></svg>';
     return {
       status: 'fresh', indicator, progress, progressPct, progressColor,
-      iconSvg,
+      iconSvg, hitRingSvg,
       valColor: '', valDeco: 'none', valOp: '1', text: hitPct + '%', countdown: '',
       ctxIconColor: '',
     };
@@ -601,7 +608,7 @@ export function createPresentation(turnFactory = createTurnPresentation) {
     return view;
   }
   function appearance(prefs = {}) {
-    return { uiSkin: prefs.uiSkin === 'frosted' ? 'frosted' : 'native', panelLayout: prefs.panelLayout || 'natural', density: prefs.density || 'compact', quotaIndicator: prefs.quotaIndicator || 'ring', cacheIndicator: ['ring', 'bar'].includes(prefs.cacheIndicator) ? prefs.cacheIndicator : 'icon', labelCase: prefs.labelCase || 'lowercase', resetFormat: prefs.resetFormat === 'localized' ? 'localized' : 'compact', contextLayout: prefs.contextLayout === 'rows' ? 'rows' : 'columns', turnLayout: prefs.turnLayout === 'rows' ? 'rows' : 'columns', contextMarker: prefs.contextMarker === 'dot' ? 'dot' : 'square', turnMarker: prefs.turnMarker === 'dot' ? 'dot' : 'square', showContextBreakdown: String(prefs.showContextBreakdown !== false), columnLabel: String(prefs.columnLabel !== false), columnValue: String(prefs.columnValue !== false), columnPercent: String(prefs.columnPercent === true), showQuotaDividers: String(prefs.showQuotaDividers !== false), popAnimation: String(prefs.popAnimation === true) };
+    return { uiSkin: prefs.uiSkin === 'frosted' ? 'frosted' : 'native', panelLayout: prefs.panelLayout || 'natural', density: prefs.density || 'compact', quotaIndicator: prefs.quotaIndicator || 'ring', cacheIndicator: ['ring', 'bar'].includes(prefs.cacheIndicator) ? prefs.cacheIndicator : 'icon', cacheHitFormat: ['ring', 'both'].includes(prefs.cacheHitFormat) ? prefs.cacheHitFormat : 'percent', labelCase: prefs.labelCase || 'lowercase', resetFormat: prefs.resetFormat === 'localized' ? 'localized' : 'compact', contextLayout: prefs.contextLayout === 'rows' ? 'rows' : 'columns', turnLayout: prefs.turnLayout === 'rows' ? 'rows' : 'columns', contextMarker: prefs.contextMarker === 'dot' ? 'dot' : 'square', turnMarker: prefs.turnMarker === 'dot' ? 'dot' : 'square', showContextBreakdown: String(prefs.showContextBreakdown !== false), columnLabel: String(prefs.columnLabel !== false), columnValue: String(prefs.columnValue !== false), columnPercent: String(prefs.columnPercent === true), showQuotaDividers: String(prefs.showQuotaDividers !== false), popAnimation: String(prefs.popAnimation === true) };
   }
   function formatReset(isoStr, prefs = {}, now = Date.now()) {
     if (!isoStr) return '';
@@ -654,7 +661,7 @@ export function createPresentation(turnFactory = createTurnPresentation) {
     return t;
   }
   const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  return { version: 71, dictionaries, locale, systemLocale, apply, appearance, formatReset, escapeHtml, formatTokens, cacheThresholds, makeCacheRingSvg, cacheTooltip, cacheView, contextBreakdown, contextTooltips, renderContextTooltips, quotaTooltip, applyQuotaTooltips, quotaColor, makeRingSvg, formatGroupTitle, formatBucketLabel, activeGroupColor, quotaView, alertView, renderAlerts, generationText, generationMarkup, renderGeneration, ...turnMethods };
+  return { version: 72, dictionaries, locale, systemLocale, apply, appearance, formatReset, escapeHtml, formatTokens, cacheThresholds, makeCacheRingSvg, cacheTooltip, cacheView, contextBreakdown, contextTooltips, renderContextTooltips, quotaTooltip, applyQuotaTooltips, quotaColor, makeRingSvg, formatGroupTitle, formatBucketLabel, activeGroupColor, quotaView, alertView, renderAlerts, generationText, generationMarkup, renderGeneration, ...turnMethods };
 }
 
-export const getPresentationScript = () => `if (globalThis.__agyCapsulePresentation?.version !== 71) globalThis.__agyCapsulePresentation = (${createPresentation.toString()})(${createTurnPresentation.toString()});`;
+export const getPresentationScript = () => `if (globalThis.__agyCapsulePresentation?.version !== 72) globalThis.__agyCapsulePresentation = (${createPresentation.toString()})(${createTurnPresentation.toString()});`;

@@ -69,6 +69,8 @@ Shows the remaining 5-hour and weekly quotas and their reset countdowns for the 
 
 - **Cache indicator**: Icon, ring, bar. Ring and bar fill linearly over time since the last activity, turning yellow then red, and stay full once expired.
 
+- **Cache hit rate**: Percent (default), ring, or both. The ring's arc is the hit rate itself, so it can replace the percentage or sit next to it. It is independent of the Cache indicator, which tracks expiry.
+
 - **Reset countdown**: Compact, localized.
 
 - **Panel pop-in animation (off by default)**: Panels fade and rise slightly as they open. It never plays while the system asks for reduced motion.
