@@ -86,11 +86,11 @@ function pageMount(d) {
   }
 
   // Upgrade or initialize DOM structure in-place
-  if (root.getAttribute('data-deck-ver') !== '112') {
+  if (root.getAttribute('data-deck-ver') !== '113') {
     release(root);
     root._pinnedGroup = null;
     root.removeAttribute('data-pinned');
-    root.setAttribute('data-deck-ver', '112');
+    root.setAttribute('data-deck-ver', '113');
     root._speedActivity = null;
     root._motionPrev = null;
     root._renderKey = null;
@@ -270,6 +270,14 @@ function pageMount(d) {
           font-size: 13.5px;
           line-height: 1.35;
           pointer-events: none;
+        }
+        /* Frosted skin: only the panel material changes. The surface is the host's own --card, made
+           translucent over a blurred backdrop, so it follows light and dark themes by itself. The
+           highlight and the shadow are plain white and black at low alpha and need no theme at all. */
+        #deck-metrics-strip[data-ui-skin="frosted"] .dk-pop {
+          background: linear-gradient(rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0) 55%), color-mix(in srgb, var(--card, rgba(20, 20, 22, 0.97)) 80%, transparent);
+          backdrop-filter: blur(22px) saturate(150%);
+          box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 10px 28px -10px rgba(0, 0, 0, 0.3), 0 2px 6px rgba(0, 0, 0, 0.08);
         }
         #deck-metrics-strip .dk-grp:hover .dk-pop {
           display: block;

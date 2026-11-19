@@ -57,6 +57,8 @@ Shows the remaining 5-hour and weekly quotas and their reset countdowns for the 
 
   Both language settings only affect agy-capsule's own interface. They don't translate Antigravity itself.
 
+- **Panel skin**: Native (default) or frosted. Frosted changes only the material of the footer panels: translucent over a blurred backdrop. Colors still come from the host theme variables, so light and dark themes are followed automatically.
+
 - **Panel height**: Natural height sizes each panel to its content; matched height gives every panel the same height.
 
 - **Panel spacing**: Compact, standard, spacious.

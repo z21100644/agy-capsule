@@ -16,7 +16,7 @@ import { installAsyncHostRoutes, installEpipeGuard } from './host_bridge.mjs';
 import { createCdpNoticeManager } from './cdp_notice.mjs';
 
 const settingsStore = createSettingsStore();
-const PANEL_VERSION = 113;
+const PANEL_VERSION = 114;
 const presentation = createPresentation();
 export function getNotifyText(shortcutState, prefs) {
   const t = presentation.dictionaries[prefs?.settingsLanguage] || presentation.dictionaries['zh-CN'];
@@ -1230,6 +1230,10 @@ const UI_HTML = `<!DOCTYPE html>
     ], { helpId: 'language-scope', tip: 'languageScopeNote' })}
 
     <div class="settings-scope" data-i18n="appearanceSection"></div>
+    ${renderPickCard('uiSkin', [
+      ['native', 'nativeSkin', '<span data-i18n="nativeSkin"></span>'],
+      ['frosted', 'frostedSkin', '<span data-i18n="frostedSkin"></span>'],
+    ])}
     ${renderPickCard('panelLayout', [
       ['natural', 'naturalLayout', '<span class="pv-ico-layout"><i class="pv-il-tall"></i><i class="pv-il-short"></i></span>'],
       ['matched', 'matchedLayout', '<span class="pv-ico-layout"><i class="pv-il-tall"></i><i class="pv-il-tall"></i></span>'],

@@ -20,6 +20,7 @@ Provides **Statistics** and **Settings** tabs at the top (settings live exclusiv
 
 - **Languages** (`en` / `zh-CN` / `zh-TW`): Independent **Display language** (`en` default, for stats/panels) and **Settings language** (`zh-CN` default, for the Settings UI).
 - **Appearance**:
+  - **Panel skin**: `native` (default) or `frosted` (footer panels only: the host `--card` color made translucent over a blurred backdrop; colors still come from the host theme variables, with no light/dark detection)
   - **Panel height**: `natural` (default) or `matched`
   - **Panel spacing**: `compact` (default), `standard`, or `spacious`
   - **Label casing**: `lowercase` (default) or `titlecase`

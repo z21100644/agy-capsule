@@ -489,6 +489,22 @@ test('the panel pop-in is opt-in and is never declared under reduced motion', ()
   assert.equal(deck.match(/animation: dk-pop-in/g).length, 1);
 });
 
+test('the frosted skin is opt-in, changes only the panel material and never asks whether the host is light or dark', () => {
+  assert.equal(DEFAULT_SETTINGS.uiSkin, 'native');
+  const ui = createPresentation();
+  assert.equal(ui.appearance({}).uiSkin, 'native');
+  assert.equal(ui.appearance({ uiSkin: 'frosted' }).uiSkin, 'frosted');
+  const deck = readFileSync(new URL('../agy-capsule/sidecars/agy_capsule/deck_injector.mjs', import.meta.url), 'utf8');
+  // A single rule, on the panels only: the host's own card color, translucent over a blurred backdrop.
+  const rules = deck.match(/#deck-metrics-strip\[data-ui-skin="frosted"\][^{]*\{[^}]*\}/g);
+  assert.equal(rules.length, 1);
+  assert.match(rules[0], /^#deck-metrics-strip\[data-ui-skin="frosted"\] \.dk-pop \{/);
+  assert.match(rules[0], /background: [^;]*color-mix\(in srgb, var\(--card, [^;]*, transparent\);/);
+  assert.match(rules[0], /backdrop-filter: blur\(/);
+  assert.doesNotMatch(rules[0], /light-dark/);
+  assert.doesNotMatch(deck, /prefers-color-scheme|data-theme/);
+});
+
 test('help dots, disabled option controls, turn preview short labels, and convId validation stay consistent', async () => {
   const settingsHtml = UI_HTML.slice(UI_HTML.indexOf('<section class="settings'));
   assert.equal((settingsHtml.match(/<span class="setting-help-dot" aria-hidden="true">\?<\/span>/g) || []).length, 4);
