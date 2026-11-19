@@ -101,3 +101,22 @@ test('the sidebar repaints only when its data or settings changed', async () => 
   assert.ok(await poll() <= 2);
   assert.notEqual(fill.style.width, width);
 });
+
+test('statistics behind the settings tab are not refreshed and catch up when it is left', async () => {
+  const data = snapshot(Date.now());
+  const { dom, context, poll, used } = await openSidebar(data);
+  await poll();
+  assert.equal(used.textContent, '50%');
+
+  // A missing debugging port is reported once two polls in a row have seen it.
+  vm.runInContext("selectSidebarView('settings')", context);
+  data.contextTokens = 64000;
+  data.deckCdp = 'missing';
+  await poll();
+  await poll();
+  assert.equal(used.textContent, '50%');
+  assert.equal(dom.document.getElementById('cdp-notice').hidden, false, 'the notice shown on both tabs stays live');
+
+  vm.runInContext("selectSidebarView('stats')", context);
+  assert.equal(used.textContent, '25%');
+});

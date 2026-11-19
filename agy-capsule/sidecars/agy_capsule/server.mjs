@@ -1376,6 +1376,7 @@ const UI_HTML = `<!DOCTYPE html>
           tab.tabIndex = selected ? 0 : -1;
           document.getElementById('sidebar-' + name).hidden = !selected;
         }
+        if (view === 'stats' && lastData) renderData(lastData);
         renderHealthNotice();
         window.scrollTo({ top: sidebarScroll[view], behavior: 'instant' });
       }
@@ -1707,6 +1708,8 @@ const UI_HTML = `<!DOCTYPE html>
     function renderData(d) {
         // The notice follows the health samples, which can change under an unchanged snapshot.
         renderHealthNotice();
+        // Statistics hidden behind the settings tab are not refreshed; they catch up when it is left.
+        if (sidebarView !== 'stats') return;
         const cache = presentation.cacheView(d, prefs);
         paintCacheIndicator(cache);
         // Everything else is repainted only when the snapshot, the settings or a clock-driven text
