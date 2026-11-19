@@ -29,6 +29,7 @@ Provides **Statistics** and **Settings** tabs at the top (settings live exclusiv
 - **Features** (unified section):
   - **Highlight active model**: `false` (dims non-active quota pools when enabled)
   - **Hide absent quota windows**: `true` (hides empty windows such as Argon's missing 5h window on AI Pro)
+  - **Quota group dividers**: `true` (thin line between quota pools in the footer panel and in a narrow sidebar, where pools are stacked rather than shown as cards)
   - **Cache expiry alert**: `true` with configurable yellow/red thresholds (`cacheWarnMin`: `3m`, `1–998`; `cacheColdMin`: `4m`, `2–999`; synced with panel Cache row)
   - **Context overload alert**: `true` (capsule text turns yellow above 75% and red above 90%)
   - **Request failure capsule**: `true`

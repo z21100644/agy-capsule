@@ -86,11 +86,11 @@ function pageMount(d) {
   }
 
   // Upgrade or initialize DOM structure in-place
-  if (root.getAttribute('data-deck-ver') !== '110') {
+  if (root.getAttribute('data-deck-ver') !== '111') {
     release(root);
     root._pinnedGroup = null;
     root.removeAttribute('data-pinned');
-    root.setAttribute('data-deck-ver', '110');
+    root.setAttribute('data-deck-ver', '111');
     root._speedActivity = null;
     root._motionPrev = null;
     root._renderKey = null;
@@ -538,6 +538,7 @@ function pageMount(d) {
         #deck-metrics-strip .generation-heading { margin-bottom: var(--agy-row-gap); }
         #deck-metrics-strip .dk-q-group { margin: 0; }
         #deck-metrics-strip .dk-q-group + .dk-q-group { margin-top: calc(var(--agy-section-gap) + 4px); padding-top: 0; border-top: 0; }
+        #deck-metrics-strip[data-show-quota-dividers="true"] .dk-q-group + .dk-q-group { margin-top: var(--agy-section-gap); padding-top: var(--agy-section-gap); border-top: 1px solid var(--border, rgba(142, 142, 147, 0.24)); }
         #deck-metrics-strip .dk-q-title { margin-bottom: var(--agy-row-gap); }
         #deck-metrics-strip .dk-q-row { margin-bottom: var(--agy-row-gap); }
         #deck-metrics-strip .dk-q-row:last-child { margin-bottom: 0; }

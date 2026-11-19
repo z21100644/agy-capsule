@@ -40,6 +40,7 @@ Shows the remaining 5-hour and weekly quotas and their reset countdowns for the 
 
 - **Highlight active model**: Highlights the pool of the selected model and dims the others.
 - **Hide absent quota windows (on by default)**: For example, AI Pro users' Argon pool has no 5-hour quota, so that empty window is hidden.
+- **Quota group dividers (on by default)**: Draws a thin line between quota pools in the footer panel and in a narrow sidebar.
 
 ## Error & queue alerts
 

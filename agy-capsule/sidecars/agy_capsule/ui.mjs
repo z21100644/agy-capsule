@@ -26,6 +26,7 @@ export function createPresentation(turnFactory = createTurnPresentation) {
       sidebarStats: 'Statistics', sidebarSettings: 'Settings', sidebarNavigation: 'Sidebar view',
       settingsLanguage: 'Settings language', highlightActiveModel: 'Highlight active model',
       hideUnavailableQuota: 'Hide absent quota windows',
+      showQuotaDividers: 'Quota group dividers',
       showCacheWarnings: 'Cache expiry alert',
       cacheWarnMin: 'Yellow alert (min)', cacheColdMin: 'Red alert (min)',
       showContextWarnings: 'Context overload alert', showRequestErrors: 'Request failure capsule',
@@ -108,6 +109,7 @@ export function createPresentation(turnFactory = createTurnPresentation) {
       sidebarStats: '统计', sidebarSettings: '设置', sidebarNavigation: 'Sidebar 页面',
       settingsLanguage: '设置语言', highlightActiveModel: '突出当前模型',
       hideUnavailableQuota: '隐藏不存在的配额窗口',
+      showQuotaDividers: '配额组分隔线',
       showCacheWarnings: '缓存过期提醒',
       cacheWarnMin: '变黄时间（分钟）', cacheColdMin: '变红时间（分钟）',
       showContextWarnings: '上下文过载提醒', showRequestErrors: '请求失败胶囊',
@@ -190,6 +192,7 @@ export function createPresentation(turnFactory = createTurnPresentation) {
       sidebarStats: '統計', sidebarSettings: '設定', sidebarNavigation: 'Sidebar 頁面',
       settingsLanguage: '設定語言', highlightActiveModel: '突出目前模型',
       hideUnavailableQuota: '隱藏不存在的配額視窗',
+      showQuotaDividers: '配額組分隔線',
       showCacheWarnings: '快取過期提醒',
       cacheWarnMin: '變黃時間（分鐘）', cacheColdMin: '變紅時間（分鐘）',
       showContextWarnings: '上下文過載提醒', showRequestErrors: '請求失敗膠囊',
@@ -592,7 +595,7 @@ export function createPresentation(turnFactory = createTurnPresentation) {
     return view;
   }
   function appearance(prefs = {}) {
-    return { panelLayout: prefs.panelLayout || 'natural', density: prefs.density || 'compact', quotaIndicator: prefs.quotaIndicator || 'ring', cacheIndicator: ['ring', 'bar'].includes(prefs.cacheIndicator) ? prefs.cacheIndicator : 'icon', labelCase: prefs.labelCase || 'lowercase', resetFormat: prefs.resetFormat === 'localized' ? 'localized' : 'compact', contextLayout: prefs.contextLayout === 'rows' ? 'rows' : 'columns', turnLayout: prefs.turnLayout === 'rows' ? 'rows' : 'columns', contextMarker: prefs.contextMarker === 'dot' ? 'dot' : 'square', turnMarker: prefs.turnMarker === 'dot' ? 'dot' : 'square', showContextBreakdown: String(prefs.showContextBreakdown !== false), columnLabel: String(prefs.columnLabel !== false), columnValue: String(prefs.columnValue !== false), columnPercent: String(prefs.columnPercent === true) };
+    return { panelLayout: prefs.panelLayout || 'natural', density: prefs.density || 'compact', quotaIndicator: prefs.quotaIndicator || 'ring', cacheIndicator: ['ring', 'bar'].includes(prefs.cacheIndicator) ? prefs.cacheIndicator : 'icon', labelCase: prefs.labelCase || 'lowercase', resetFormat: prefs.resetFormat === 'localized' ? 'localized' : 'compact', contextLayout: prefs.contextLayout === 'rows' ? 'rows' : 'columns', turnLayout: prefs.turnLayout === 'rows' ? 'rows' : 'columns', contextMarker: prefs.contextMarker === 'dot' ? 'dot' : 'square', turnMarker: prefs.turnMarker === 'dot' ? 'dot' : 'square', showContextBreakdown: String(prefs.showContextBreakdown !== false), columnLabel: String(prefs.columnLabel !== false), columnValue: String(prefs.columnValue !== false), columnPercent: String(prefs.columnPercent === true), showQuotaDividers: String(prefs.showQuotaDividers !== false) };
   }
   function formatReset(isoStr, prefs = {}, now = Date.now()) {
     if (!isoStr) return '';
@@ -645,7 +648,7 @@ export function createPresentation(turnFactory = createTurnPresentation) {
     return t;
   }
   const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  return { version: 68, dictionaries, locale, systemLocale, apply, appearance, formatReset, escapeHtml, formatTokens, cacheThresholds, makeCacheRingSvg, cacheTooltip, cacheView, contextBreakdown, contextTooltips, renderContextTooltips, quotaTooltip, applyQuotaTooltips, quotaColor, makeRingSvg, formatGroupTitle, formatBucketLabel, activeGroupColor, quotaView, alertView, renderAlerts, generationText, generationMarkup, renderGeneration, ...turnMethods };
+  return { version: 69, dictionaries, locale, systemLocale, apply, appearance, formatReset, escapeHtml, formatTokens, cacheThresholds, makeCacheRingSvg, cacheTooltip, cacheView, contextBreakdown, contextTooltips, renderContextTooltips, quotaTooltip, applyQuotaTooltips, quotaColor, makeRingSvg, formatGroupTitle, formatBucketLabel, activeGroupColor, quotaView, alertView, renderAlerts, generationText, generationMarkup, renderGeneration, ...turnMethods };
 }
 
-export const getPresentationScript = () => `if (globalThis.__agyCapsulePresentation?.version !== 68) globalThis.__agyCapsulePresentation = (${createPresentation.toString()})(${createTurnPresentation.toString()});`;
+export const getPresentationScript = () => `if (globalThis.__agyCapsulePresentation?.version !== 69) globalThis.__agyCapsulePresentation = (${createPresentation.toString()})(${createTurnPresentation.toString()});`;

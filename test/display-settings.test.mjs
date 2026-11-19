@@ -341,6 +341,25 @@ test('footer quota popover shares one column grid across groups so percentages a
   assert.doesNotMatch(source, /\.dk-q-row \{[^}]*grid-template-columns: minmax/);
 });
 
+test('quota group dividers are on by default, switchable, and drawn only between stacked groups', () => {
+  assert.equal(DEFAULT_SETTINGS.showQuotaDividers, true);
+  const dir = mkdtempSync(join(tmpdir(), 'agy-dividers-'));
+  try {
+    const store = createSettingsStore(join(dir, 'settings.json'));
+    assert.equal(store.update({ showQuotaDividers: false }).showQuotaDividers, false);
+    assert.equal(store.update({ showQuotaDividers: 'no' }).showQuotaDividers, false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+
+  const ui = createPresentation();
+  assert.equal(ui.appearance({}).showQuotaDividers, 'true', 'settings saved before the option existed keep the default');
+  assert.equal(ui.appearance({ showQuotaDividers: false }).showQuotaDividers, 'false');
+
+  const deck = readFileSync(new URL('../agy-capsule/sidecars/agy_capsule/deck_injector.mjs', import.meta.url), 'utf8');
+  assert.match(deck, /\[data-show-quota-dividers="true"\] \.dk-q-group \+ \.dk-q-group \{[^}]*border-top: 1px solid var\(--border,/);
+  // A wide sidebar already separates the groups as cards.
+  assert.match(UI_HTML, /@container stats \(width < 420px\) \{\s*body\[data-show-quota-dividers="true"\] \.stats-quota \.quota-group \+ \.quota-group \{[^}]*border-top: 1px solid var\(--border,/);
+});
+
 test('context breakdown and turn metrics each switch between columns and rows, with column field toggles', () => {
   assert.equal(DEFAULT_SETTINGS.contextLayout, 'columns');
   assert.equal(DEFAULT_SETTINGS.turnLayout, 'columns');

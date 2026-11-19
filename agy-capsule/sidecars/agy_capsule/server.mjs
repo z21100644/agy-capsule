@@ -16,7 +16,7 @@ import { installAsyncHostRoutes, installEpipeGuard } from './host_bridge.mjs';
 import { createCdpNoticeManager } from './cdp_notice.mjs';
 
 const settingsStore = createSettingsStore();
-const PANEL_VERSION = 111;
+const PANEL_VERSION = 112;
 const presentation = createPresentation();
 export function getNotifyText(shortcutState, prefs) {
   const t = presentation.dictionaries[prefs?.settingsLanguage] || presentation.dictionaries['zh-CN'];
@@ -488,6 +488,10 @@ const PV_CARD_PREVIEW = {
   hideUnavailableQuota: `<div class="pv-hide-quota">
     <span class="pv-pill pv-hq-pill"><span class="pv-hq-miss">${PV_SVG.clock}<span>--%</span></span><span class="pv-hq-keep">${PV_SVG.cal}<span>85%</span></span></span>
     <span class="pv-pill pv-hq-pill"><span class="pv-hq-zero">${PV_SVG.clock}<span>0%</span></span><span class="pv-hq-keep">${PV_SVG.cal}<span>85%</span></span></span>
+  </div>`,
+  showQuotaDividers: `<div class="pv-quota-dividers">
+    <div class="pv-qm-row"><span class="pv-qm-name">Gemini</span><span class="pv-qm-bar"><span style="width:85%"></span></span><span class="pv-qm-pct">85%</span></div>
+    <div class="pv-qm-row"><span class="pv-qm-name">Claude</span><span class="pv-qm-bar"><span style="width:60%"></span></span><span class="pv-qm-pct">60%</span></div>
   </div>`,
   showCacheWarnings: `<div class="pv-cache-warn">
     <span class="pv-pill pv-ca-1">${PV_SVG.db}<span data-cache-pv="fresh">&lt;3m</span></span>
@@ -965,6 +969,9 @@ const UI_HTML = `<!DOCTYPE html>
     .pv-hq-miss { max-width: 56px; opacity: 1; margin-right: 6px; transition: max-width .22s ease, opacity .18s ease, margin-right .22s ease; }
     .pv-hq-zero { margin-right: 6px; color: #ef4444; font-weight: 600; }
     [data-setting-card="hideUnavailableQuota"][data-checked="true"] .pv-hq-miss { max-width: 0; opacity: 0; margin-right: 0; }
+    /* Quota group dividers: checked draws the line between the two pools */
+    .pv-quota-dividers .pv-qm-row + .pv-qm-row { margin-top: 4px; padding-top: 4px; border-top: 1px solid transparent; transition: border-color .18s ease; }
+    [data-setting-card="showQuotaDividers"][data-checked="true"] .pv-qm-row + .pv-qm-row { border-top-color: var(--border, rgba(142, 142, 147, 0.24)); }
     /* Cache expiry alert: unchecked all neutral, checked 3m+ yellow icon, 4m+ red icon */
     .setting-thresholds { display: inline-flex; align-items: center; gap: 5px; min-width: 0; flex-shrink: 0; transition: opacity .18s ease; }
     .setting-threshold-card[data-checked="false"] .setting-thresholds { opacity: .42; pointer-events: none; }
@@ -1043,6 +1050,9 @@ const UI_HTML = `<!DOCTYPE html>
     .quota-group:not(:has(.quota-mid:not(:empty))) .quota-line1 { grid-template-columns: 54px minmax(0, 1fr); }
     body[data-language^="zh"] .quota-group:not(:has(.quota-mid:not(:empty))) .quota-line1 { grid-template-columns: 42px minmax(0, 1fr); }
     .quota-group:not(:has(.quota-mid:not(:empty))) .quota-mid { display: none; }
+    @container stats (width < 420px) {
+      body[data-show-quota-dividers="true"] .stats-quota .quota-group + .quota-group { padding-top: calc(var(--agy-section-gap, 6px) + 4px); border-top: 1px solid var(--border, rgba(142, 142, 147, 0.24)); }
+    }
     @container stats (min-width: 420px) {
       .stats-layout {
         gap: calc(var(--agy-section-gap, 6px) + 6px);
@@ -1250,6 +1260,7 @@ const UI_HTML = `<!DOCTYPE html>
     <div class="settings-scope" data-settings-scope="features" data-i18n="featuresSection"></div>
     ${renderCheckCard({ id: 'setting-highlight-active-model', key: 'highlightActiveModel', checked: false })}
     ${renderCheckCard({ id: 'setting-hide-unavailable-quota', key: 'hideUnavailableQuota', checked: DEFAULT_SETTINGS.hideUnavailableQuota })}
+    ${renderCheckCard({ id: 'setting-quota-dividers', key: 'showQuotaDividers', checked: DEFAULT_SETTINGS.showQuotaDividers })}
     <div class="setting-card setting-threshold-card" data-setting-card="showCacheWarnings" data-checked="${DEFAULT_SETTINGS.showCacheWarnings}">
       <div class="setting-head setting-pair-head">
         <div class="setting-pair-item">
