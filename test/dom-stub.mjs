@@ -1,8 +1,8 @@
-// A stand-in DOM for running the injected footer runtime in node:vm.
-// It has no parser and no layout. An element that was given markup answers every descendant
-// selector with one lasting stand-in element; lists are always empty.
+// A stand-in DOM for running the injected footer runtime and the sidebar page script in node:vm.
+// It has no parser and no layout. An element that was given markup, or that belongs to a page,
+// answers every descendant selector with one lasting stand-in element; lists are always empty.
 // Each element counts the DOM writes made to it, which is what the repaint tests assert on.
-export function createStubDom() {
+export function createStubDom({ page = false } = {}) {
   const dom = { writes: 0, now: Date.now(), footers: [], tick: null };
   const attached = new Map();
   // Underscore properties are the scripts' own bookkeeping, not DOM writes.
@@ -80,18 +80,20 @@ export function createStubDom() {
     return el;
   }
 
+  const body = element('body', page);
   dom.element = element;
   dom.document = {
-    documentElement: element('html'), head: element('head'), body: element('body'),
+    documentElement: element('html'), head: element('head'), body,
     createElement: tagName => element(tagName),
-    getElementById: id => attached.get(id) ?? null,
-    querySelectorAll: () => dom.footers,
+    getElementById: id => (page ? body.querySelector('#' + id) : attached.get(id) ?? null),
+    querySelector: selector => body.querySelector(selector),
+    querySelectorAll: () => (page ? [] : dom.footers),
     addEventListener() {}, removeEventListener() {},
   };
-  // The page globals the runtime reads. Timers are captured so a test drives each tick itself.
+  // The page globals the scripts read. Timers are captured so a test drives each tick itself.
   dom.globals = {
-    document: dom.document, navigator: { language: 'en', languages: ['en'] }, location: { pathname: '/' },
-    innerWidth: 1280, innerHeight: 800, addEventListener() {}, removeEventListener() {},
+    document: dom.document, navigator: { language: 'en', languages: ['en'] }, location: { pathname: '/', search: '' },
+    innerWidth: 1280, innerHeight: 800, scrollY: 0, scrollTo() {}, addEventListener() {}, removeEventListener() {},
     getComputedStyle: () => ({ display: 'block', visibility: 'visible', overflowX: 'visible', contain: 'none' }),
     matchMedia: () => ({ matches: true }), // prefers-reduced-motion: nothing animates
     requestAnimationFrame: () => 0, cancelAnimationFrame() {},
@@ -100,6 +102,7 @@ export function createStubDom() {
     SVGElement: class {},
     Date: class extends Date { static now() { return dom.now; } },
     setInterval(callback) { dom.tick = callback; return 1; }, clearInterval() {},
+    console, URLSearchParams, AbortSignal,
   };
   return dom;
 }

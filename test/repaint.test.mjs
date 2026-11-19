@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { buildRuntimeBundle } from '../agy-capsule/sidecars/agy_capsule/deck_injector.mjs';
+import { UI_HTML } from '../agy-capsule/sidecars/agy_capsule/server.mjs';
 import { DEFAULT_SETTINGS } from '../agy-capsule/sidecars/agy_capsule/settings.mjs';
 import { createStubDom } from './dom-stub.mjs';
 
@@ -12,10 +13,21 @@ const snapshot = now => ({
   prefs: { ...DEFAULT_SETTINGS },
   quotaGroups: [{ displayName: 'Gemini Models', buckets: [{ window: '5h', remainingFraction: .58 }, { window: 'weekly', remainingFraction: .55 }] }],
 });
-const windowOf = dom => {
-  const context = vm.createContext(dom.globals);
+const windowOf = (dom, extra = {}) => {
+  const context = vm.createContext({ ...dom.globals, ...extra });
   vm.runInContext('globalThis.window = globalThis;', context);
   return context;
+};
+// The sidebar page script, polling a snapshot the test can change.
+const openSidebar = async data => {
+  const dom = createStubDom({ page: true });
+  const context = windowOf(dom, { fetch: async () => ({ ok: true, status: 200, json: async () => JSON.parse(JSON.stringify(data)) }) });
+  vm.runInContext(UI_HTML.slice(UI_HTML.lastIndexOf('<script>') + '<script>'.length, UI_HTML.lastIndexOf('</script>')), context);
+  // The page starts one refresh by itself and runs only one at a time; let that one finish.
+  await new Promise(resolve => setImmediate(resolve));
+  // One poll, a second later; resolves to how many DOM writes it made.
+  const poll = async () => { const before = dom.writes; dom.now += 1000; await dom.tick(); return dom.writes - before; };
+  return { dom, context, poll, used: dom.document.getElementById('used-pct') };
 };
 
 test('the footer strip is repainted only when what it shows or where it sits changed', () => {
@@ -64,4 +76,28 @@ test('the footer strip is repainted only when what it shows or where it sits cha
   assert.equal(second(), 0);
   controls._rect = { ...controls._rect, left: 180 };
   assert.ok(second() > 0);
+});
+
+test('the sidebar repaints only when its data or settings changed', async () => {
+  const data = snapshot(Date.now());
+  const { dom, poll, used } = await openSidebar(data);
+  await poll();
+  assert.equal(used.textContent, '50%');
+  assert.equal(await poll(), 0, 'an unchanged snapshot writes nothing to the page');
+
+  data.contextTokens = 64000;
+  await poll();
+  assert.equal(used.textContent, '25%');
+
+  data.prefs.language = 'zh-CN';
+  await poll();
+  assert.equal(dom.document.body.dataset.language, 'zh-CN');
+
+  // The expiry bar advances every second, but only its fill is touched.
+  data.prefs.cacheIndicator = 'bar';
+  await poll();
+  const fill = dom.document.getElementById('cache-meter-fill');
+  const width = fill.style.width;
+  assert.ok(await poll() <= 2);
+  assert.notEqual(fill.style.width, width);
 });

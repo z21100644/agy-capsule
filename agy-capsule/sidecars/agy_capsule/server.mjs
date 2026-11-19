@@ -1359,6 +1359,8 @@ const UI_HTML = `<!DOCTYPE html>
     let settingsEpoch = 0;
     let lastData = null, refreshing = false, refreshFailures = 0;
     let sampleCode = '', sampleCount = 0, healthCode = '';
+    let renderedKey = '';
+    let cacheIconSvg = null;
     const sidebarTabs = document.querySelector('.sidebar-tabs');
     let sidebarView = 'stats';
     const sidebarScroll = { stats: 0, settings: 0 };
@@ -1675,7 +1677,9 @@ const UI_HTML = `<!DOCTYPE html>
         sampleCode = code;
         // F3/F4 and S4 already have thresholds in the backend.
         healthCode = code === healthCode || sampleCount >= 2 || !['S3', 'F1', 'F2'].includes(code) ? code : '';
-        if (!savingSettings && requestedSettingsEpoch === settingsEpoch) applySettings(d.prefs);
+        // Settings are re-applied only when they changed; renderData skips an unchanged snapshot itself.
+        const prefsChanged = JSON.stringify({ ...prefs, ...d.prefs }) !== JSON.stringify(prefs);
+        if (prefsChanged && !savingSettings && requestedSettingsEpoch === settingsEpoch) applySettings(d.prefs);
         else renderData(d);
       } catch {
         if (!panelLocked) {
@@ -1686,7 +1690,31 @@ const UI_HTML = `<!DOCTYPE html>
       } finally { refreshing = false; }
     }
 
+    // The expiry ring or bar advances with the clock, so it is painted on its own. The DOM
+    // serializes SVG differently, hence the comparison with the last write.
+    function paintCacheIndicator(cache) {
+      if (cacheIconSvg !== cache.iconSvg) document.getElementById('dot-cached').innerHTML = cacheIconSvg = cache.iconSvg;
+      const cacheMeterEl = document.getElementById('cache-meter');
+      const cacheMeterFillEl = document.getElementById('cache-meter-fill');
+      if (!cacheMeterEl || !cacheMeterFillEl) return;
+      const hidden = cache.indicator !== 'bar';
+      if (cacheMeterEl.hidden !== hidden) cacheMeterEl.hidden = hidden;
+      if (hidden) return;
+      cacheMeterFillEl.style.width = cache.progressPct;
+      cacheMeterFillEl.style.backgroundColor = cache.progressColor;
+    }
+
     function renderData(d) {
+        // The notice follows the health samples, which can change under an unchanged snapshot.
+        renderHealthNotice();
+        const cache = presentation.cacheView(d, prefs);
+        paintCacheIndicator(cache);
+        // Everything else is repainted only when the snapshot, the settings or a clock-driven text
+        // changed: the cache state, a reset countdown or a running turn's elapsed time.
+        const { iconSvg, progress, progressPct, progressColor, ...cacheState } = cache;
+        const key = JSON.stringify([d, prefs, cacheState, presentation.quotaView(d.quotaGroups, prefs, labels), d.turnMetrics && presentation.turnMetricsText(d.turnMetrics).elapsed]);
+        if (key === renderedKey) return;
+        renderedKey = key;
         presentation.renderContextTooltips(document.querySelector('.panel'), d, labels);
         presentation.renderAlerts(document.body, d, prefs, labels);
         presentation.renderGeneration(document.querySelector('.panel'), d.generation, labels, prefs);
@@ -1696,25 +1724,13 @@ const UI_HTML = `<!DOCTYPE html>
         document.getElementById('used-pct').textContent = ctx.usedPct;
         document.getElementById('used-fraction').textContent = ctx.usedFrac;
 
-        const dotCachedEl = document.getElementById('dot-cached');
         document.getElementById('seg-read').style.width = ctx.segReadW;
         document.getElementById('seg-out').style.width = ctx.segOutW;
         document.getElementById('seg-think').style.width = ctx.segThinkW;
         document.getElementById('seg-turn0').style.width = ctx.segTurn0W;
 
-        const cache = presentation.cacheView(d, prefs);
         const valCacheHitEl = document.getElementById('val-cache-hit');
         const valCacheHitKEl = document.getElementById('val-cache-hit-k');
-        const cacheMeterEl = document.getElementById('cache-meter');
-        const cacheMeterFillEl = document.getElementById('cache-meter-fill');
-        dotCachedEl.innerHTML = cache.iconSvg;
-        if (cacheMeterEl && cacheMeterFillEl) {
-          cacheMeterEl.hidden = cache.indicator !== 'bar';
-          if (!cacheMeterEl.hidden) {
-            cacheMeterFillEl.style.width = cache.progressPct;
-            cacheMeterFillEl.style.backgroundColor = cache.progressColor;
-          }
-        }
         valCacheHitEl.style.color = cache.valColor;
         valCacheHitEl.style.textDecoration = cache.valDeco;
         valCacheHitEl.style.opacity = cache.valOp;
@@ -1735,7 +1751,6 @@ const UI_HTML = `<!DOCTYPE html>
         document.getElementById('val-out-pct').textContent = ctx.outPct;
 
         renderQuota(d.quotaGroups);
-        renderHealthNotice();
     }
 
     // Shown on both tabs; text follows the open tab's language.
@@ -1767,10 +1782,12 @@ const UI_HTML = `<!DOCTYPE html>
     function renderHealthNotice() {
       const notice = document.getElementById('cdp-notice');
       const stale = refreshFailures >= 5;
-      document.getElementById('sidebar-stats').dataset.stale = String(stale);
+      const stats = document.getElementById('sidebar-stats');
+      if (stats.dataset.stale !== String(stale)) stats.dataset.stale = String(stale);
       const code = stale ? 'S2' : healthCode;
-      notice.hidden = !code || panelLocked;
-      if (notice.hidden) return;
+      const hidden = !code || panelLocked;
+      if (notice.hidden !== hidden) notice.hidden = hidden;
+      if (hidden) return;
       const dict = sidebarView === 'settings' ? settingsLabels : labels;
       notice.lang = sidebarView === 'settings' ? prefs.settingsLanguage : document.body.dataset.language;
       const badge = document.getElementById('health-code');
