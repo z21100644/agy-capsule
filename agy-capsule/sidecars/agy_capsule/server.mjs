@@ -18,7 +18,7 @@ import { createUsageHistory } from './usage_history.mjs';
 import { createUsagePresentation } from './usage_ui.mjs';
 
 const settingsStore = createSettingsStore();
-const PANEL_VERSION = 117;
+const PANEL_VERSION = 118;
 const presentation = createPresentation();
 export function getNotifyText(shortcutState, prefs) {
   const t = presentation.dictionaries[prefs?.settingsLanguage] || presentation.dictionaries['zh-CN'];
@@ -473,9 +473,10 @@ function readConversationSnapshot(dbPath, includeTurnMetrics = true) {
   };
 }
 
-// One model request for the usage history: when it started and what it consumed. Field numbers
-// follow CortexStepGeneratorMetadata.chat_model (1) -> ChatModelMetadata.usage (4) and
-// .chat_start_metadata (9).created_at (4); a step's own created_at is CortexStepMetadata field 1.
+// One model request for the usage history: when it started, which model answered and what it
+// consumed. Field numbers follow CortexStepGeneratorMetadata.chat_model (1) -> ChatModelMetadata
+// .usage (4) and .chat_start_metadata (9).created_at (4); a step's own created_at is
+// CortexStepMetadata field 1.
 function parseUsageRow(data, stepMetadata) {
   // Views, not copies: a scan walks every stored request.
   const bytes = value => (value instanceof Uint8Array ? Buffer.from(value.buffer, value.byteOffset, value.byteLength) : Buffer.alloc(0));
@@ -501,9 +502,12 @@ function parseUsageRow(data, stepMetadata) {
   // response_id (11), else message_id (7), within api_provider (6).
   const responseId = text(11);
   const messageId = text(7);
+  // model_display_name (21), else response_model (19): the names the host itself shows.
+  const name = field => bytes(chat.get(field)?.[0]).toString('utf8').trim().slice(0, 80);
   return {
     at: startedAt > 0 && startedAt < 4e9 ? startedAt * 1000 : null,
     id: responseId ? `r${count(6)}:${responseId}` : messageId ? `m${count(6)}:${messageId}` : '',
+    model: name(21) || name(19),
     ...tokens,
   };
 }
@@ -533,7 +537,7 @@ const usageHistory = createUsageHistory({ directories: conversationDirs, readReq
 
 // Conversations are scanned only while a setting shows their history.
 async function inspectUsage(prefs = settingsStore.read()) {
-  if (prefs.showUsageActivity !== true) return { enabled: false };
+  if (prefs.showUsageActivity !== true && prefs.showModelUsage !== true) return { enabled: false };
   return { enabled: true, ...await usageHistory.read() };
 }
 
@@ -590,6 +594,7 @@ const PV_CARD_PREVIEW = {
     <div class="pv-pill pv-req-pill"><span>TTFT 1.0s–3.0s</span><span><b>100.0 tok/s</b></span></div>
   </div>`,
   showUsageActivity: `<div class="pv-usage-heat">${[0, 1, 0, 2, 3, 1, 0, 4, 2, 1, 3, 0, 1, 2, 4, 3, 1, 2].map(level => `<i class="usage-cell" data-level="${level}"></i>`).join('')}</div>`,
+  showModelUsage: `<div class="pv-usage-bars">${[[5, 3], [8, 2], [4, 6], [9, 5], [6, 2], [10, 7], [7, 4], [3, 2]].map(([lower, upper]) => `<span><i style="height:${upper}px;background:#e86a24"></i><i style="height:${lower}px;background:#388bfd"></i></span>`).join('')}</div>`,
 };
 
 const renderCheckCard = ({ id, helpId = id, key, tip = '', checked = false, preview = PV_CARD_PREVIEW[key] || '' }) => `
@@ -1136,8 +1141,8 @@ const UI_HTML = `<!DOCTYPE html>
     body[data-language^="zh"] .quota-group:not(:has(.quota-mid:not(:empty))) .quota-line1 { grid-template-columns: 42px minmax(0, 1fr); }
     .quota-group:not(:has(.quota-mid:not(:empty))) .quota-mid { display: none; }
     /* Optional usage history below the statistics: hidden, unread and unfetched while it is off. */
-    .stats-usage { grid-column: 1 / -1; min-width: 0; margin-top: var(--agy-section-gap, 6px); padding-top: calc(var(--agy-section-gap, 6px) + 2px); border-top: 1px solid var(--border, rgba(142, 142, 147, 0.24)); }
-    .stats-usage[hidden] { display: none; }
+    .stats-usage { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); align-items: start; gap: calc(var(--agy-section-gap, 6px) + 6px); min-width: 0; margin-top: var(--agy-section-gap, 6px); padding-top: calc(var(--agy-section-gap, 6px) + 2px); border-top: 1px solid var(--border, rgba(142, 142, 147, 0.24)); }
+    .stats-usage[hidden], .usage-block[hidden] { display: none; }
     .usage-block { display: flex; flex-direction: column; gap: var(--agy-section-gap, 6px); min-width: 0; container-type: inline-size; container-name: usage; font-variant-numeric: tabular-nums; }
     .usage-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
     .usage-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; color: var(--foreground, #ebebeb); color: color-mix(in srgb, var(--foreground, #ebebeb) 88%, transparent); }
@@ -1171,8 +1176,27 @@ const UI_HTML = `<!DOCTYPE html>
     .usage-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
     .usage-foot > :first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .usage-legend { display: inline-flex; flex-shrink: 0; align-items: center; gap: 3px; }
+    .usage-nav { display: flex; align-items: center; gap: 4px; font-size: 11.5px; color: var(--muted-foreground, #8e8e93); }
+    .usage-nav button { flex: none; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: inherit; font: inherit; font-size: 14px; line-height: 1; cursor: pointer; }
+    .usage-nav button:hover:enabled { color: var(--foreground, #ebebeb); background: color-mix(in srgb, var(--foreground, #ebebeb) 8%, transparent); }
+    .usage-nav button:disabled { opacity: .35; cursor: default; }
+    .usage-nav button:focus-visible { outline: 2px solid #388bfd; outline-offset: 1px; }
+    .usage-range { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .usage-nav-total { flex: none; margin-left: auto; white-space: nowrap; color: var(--foreground, #ebebeb); color: color-mix(in srgb, var(--foreground, #ebebeb) 88%, transparent); }
+    /* A bar is a column: free space, then the stack, sharing the height by tokens. Its label hangs below. */
+    .usage-bars { display: flex; gap: 3px; height: 72px; margin-bottom: 14px; border-bottom: 1px solid var(--border, rgba(142, 142, 147, 0.24)); }
+    .usage-bar { position: relative; flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; align-items: center; }
+    .usage-bar-stack { display: flex; flex-direction: column-reverse; width: 100%; max-width: 16px; min-height: 2px; border-radius: 2px 2px 0 0; overflow: hidden; }
+    .usage-bar-x { position: absolute; top: 100%; left: 50%; transform: translateX(-50%); font-size: 9.5px; line-height: 14px; white-space: nowrap; color: var(--muted-foreground, #8e8e93); }
+    .usage-models { display: flex; flex-direction: column; gap: var(--agy-row-gap, 4px); }
+    .usage-model { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto auto; align-items: center; column-gap: 8px; }
+    .usage-dot { width: 10px; height: 10px; border-radius: 3px; }
+    .usage-model-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .usage-model-share { min-width: 30px; text-align: right; color: var(--muted-foreground, #8e8e93); }
+    .usage-model-tokens { min-width: 40px; text-align: right; font-weight: 500; color: var(--foreground, #ebebeb); color: color-mix(in srgb, var(--foreground, #ebebeb) 88%, transparent); }
     @container stats (width < 420px) {
       body[data-show-quota-dividers="true"] .stats-quota .quota-group + .quota-group { padding-top: calc(var(--agy-section-gap, 6px) + 4px); border-top: 1px solid var(--border, rgba(142, 142, 147, 0.24)); }
+      .usage-block:not([hidden]) ~ .usage-block:not([hidden]) { padding-top: calc(var(--agy-section-gap, 6px) + 2px); border-top: 1px solid var(--border, rgba(142, 142, 147, 0.24)); }
     }
     @container stats (min-width: 420px) {
       .stats-layout {
@@ -1280,7 +1304,11 @@ const UI_HTML = `<!DOCTYPE html>
     .pv-restart-note { font-size: 11.5px; color: var(--muted-foreground, #8e8e93); transition: opacity .18s ease; }
     [data-setting-card="notifyCdpRestart"][data-checked="false"] .pv-restart-note { opacity: .4; }
     .pv-usage-heat { display: flex; gap: 2px; transition: opacity .18s ease; }
-    [data-setting-card="showUsageActivity"][data-checked="false"] .pv-usage-heat { opacity: .4; }
+    .pv-usage-bars { display: flex; align-items: flex-end; gap: 3px; height: 18px; transition: opacity .18s ease; }
+    .pv-usage-bars > span { display: flex; flex-direction: column; width: 6px; border-radius: 1.5px 1.5px 0 0; overflow: hidden; }
+    .pv-usage-bars i { display: block; }
+    [data-setting-card="showUsageActivity"][data-checked="false"] .pv-usage-heat,
+    [data-setting-card="showModelUsage"][data-checked="false"] .pv-usage-bars { opacity: .4; }
     @media(pointer:coarse) { .pv-swatch { min-height: 40px; } }
   </style>
 </head>
@@ -1362,7 +1390,8 @@ const UI_HTML = `<!DOCTYPE html>
       <div class="divider"></div>
       <div id="quota-root" class="stats-quota"></div>
       <section class="stats-usage" id="usage-root" hidden>
-        <div class="usage-block" id="usage-activity"></div>
+        <div class="usage-block" id="usage-activity" hidden></div>
+        <div class="usage-block" id="usage-models" hidden></div>
       </section>
     </div>
   </div>
@@ -1500,6 +1529,7 @@ const UI_HTML = `<!DOCTYPE html>
       </div></div>
     </div>
     ${renderCheckCard({ id: 'setting-usage-activity', key: 'showUsageActivity', checked: DEFAULT_SETTINGS.showUsageActivity })}
+    ${renderCheckCard({ id: 'setting-model-usage', key: 'showModelUsage', checked: DEFAULT_SETTINGS.showModelUsage })}
     <div class="setting-card setting-threshold-card" data-setting-card="showQueueWarnings" data-checked="${DEFAULT_SETTINGS.showQueueWarnings}">
       <div class="setting-head setting-pair-head">
         <div class="setting-pair-item">
@@ -1540,20 +1570,32 @@ const UI_HTML = `<!DOCTYPE html>
     let usageDueAt = 0;
     let usageBusy = false;
     let usageScale = 'day';
-    let usageKey = '';
+    let usagePeriod = 'day';
+    let usageShift = 0;
+    const usageKeys = { activity: '', models: '' };
+    function usageBlocks() {
+      return { activity: prefs.showUsageActivity === true, models: prefs.showModelUsage === true };
+    }
     function renderUsage() {
+      const shown = usageBlocks();
       const root = document.getElementById('usage-root');
-      const hidden = prefs.showUsageActivity !== true;
+      const hidden = !shown.activity && !shown.models;
       if (root.hidden !== hidden) root.hidden = hidden;
-      if (hidden) return;
-      const view = { today: usageUi.localDay(Date.now()), scale: usageScale, language: document.body.dataset.language };
-      const key = JSON.stringify([usageData, view]);
-      if (key === usageKey) return;
-      usageKey = key;
-      document.getElementById('usage-activity').innerHTML = usageUi.activityHtml(usageData, view);
+      const common = { today: usageUi.localDay(Date.now()), language: document.body.dataset.language };
+      const views = { activity: { ...common, scale: usageScale }, models: { ...common, period: usagePeriod, shift: usageShift } };
+      for (const name of ['activity', 'models']) {
+        const block = document.getElementById('usage-' + name);
+        if (block.hidden === shown[name]) block.hidden = !shown[name];
+        if (!shown[name]) continue;
+        const key = JSON.stringify([usageData, views[name]]);
+        if (key === usageKeys[name]) continue;
+        usageKeys[name] = key;
+        block.innerHTML = name === 'activity' ? usageUi.activityHtml(usageData, views.activity) : usageUi.modelsHtml(usageData, views.models);
+      }
     }
     async function refreshUsage() {
-      if (usageBusy || panelLocked || prefs.showUsageActivity !== true || sidebarView !== 'stats' || Date.now() < usageDueAt) return;
+      const shown = usageBlocks();
+      if (usageBusy || panelLocked || !(shown.activity || shown.models) || sidebarView !== 'stats' || Date.now() < usageDueAt) return;
       usageBusy = true;
       try {
         // A first scan of a long history can take a while; give up on a request that hangs.
@@ -1569,11 +1611,17 @@ const UI_HTML = `<!DOCTYPE html>
       }
     }
     document.getElementById('usage-root').addEventListener('click', event => {
-      const scale = event.target.closest('[data-usage-scale]')?.dataset.usageScale;
-      if (!scale || scale === usageScale) return;
-      usageScale = scale;
+      const control = event.target.closest('[data-usage-scale], [data-usage-period], [data-usage-shift]');
+      if (!control || control.disabled) return;
+      const { usageScale: scale, usagePeriod: period, usageShift: shift } = control.dataset;
+      if (scale) usageScale = scale;
+      if (period) { usagePeriod = period; usageShift = 0; }
+      if (shift) usageShift = Math.min(0, usageShift + Number(shift));
       renderUsage();
-      document.querySelector('[data-usage-scale="' + scale + '"]')?.focus();
+      // The block was redrawn: keep the keyboard on the control that was used, or on the other
+      // arrow once paging has run into its end.
+      const used = document.querySelector(scale ? '[data-usage-scale="' + scale + '"]' : period ? '[data-usage-period="' + period + '"]' : '[data-usage-shift="' + shift + '"]');
+      (used?.disabled ? document.querySelector('[data-usage-shift]:enabled') : used)?.focus();
     });
     const sidebarTabs = document.querySelector('.sidebar-tabs');
     let sidebarView = 'stats';

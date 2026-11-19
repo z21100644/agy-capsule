@@ -12,8 +12,9 @@ function localDay(epochMs) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
-// Adds requests up per local day. A response stored in more than one conversation file is one
-// request and keeps its fullest record; a request without a start time counts towards no day.
+// Adds requests up per local day and, within a day, per model. A response stored in more than
+// one conversation file is one request and keeps its fullest record; a request without a start
+// time counts towards no day.
 export function summarizeUsage(requests) {
   const identified = new Map();
   const counted = [];
@@ -24,16 +25,22 @@ export function summarizeUsage(requests) {
   }
   for (const request of identified.values()) counted.push(request);
   const emptyBucket = () => ({ requests: 0, uncached: 0, cacheRead: 0, cacheWrite: 0, output: 0 });
+  const add = (bucket, request) => {
+    bucket.requests++;
+    for (const key of COUNTERS) bucket[key] += request[key];
+  };
   const days = new Map();
   const undated = emptyBucket();
   for (const request of counted) {
-    const date = request.at === null ? '' : localDay(request.at);
-    const bucket = date ? days.get(date) ?? days.set(date, emptyBucket()).get(date) : undated;
-    bucket.requests++;
-    for (const key of COUNTERS) bucket[key] += request[key];
+    if (request.at === null) { add(undated, request); continue; }
+    const date = localDay(request.at);
+    const day = days.get(date) ?? days.set(date, { total: emptyBucket(), models: new Map() }).get(date);
+    add(day.total, request);
+    add(day.models.get(request.model) ?? day.models.set(request.model, emptyBucket()).get(request.model), request);
   }
+  const byKey = ([a], [b]) => (a < b ? -1 : a > b ? 1 : 0);
   return {
-    days: [...days].sort(([a], [b]) => (a < b ? -1 : 1)).map(([date, bucket]) => ({ date, ...bucket })),
+    days: [...days].sort(byKey).map(([date, day]) => ({ date, ...day.total, models: [...day.models].sort(byKey).map(([name, bucket]) => ({ name, ...bucket })) })),
     undated,
   };
 }

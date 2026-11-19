@@ -17,9 +17,10 @@ const integer = (field, n) => Buffer.concat([vi(field * 8), vi(n)]);
 const message = (field, data) => Buffer.concat([vi(field * 8 + 2), vi(data.length), data]);
 const text = (field, value) => message(field, Buffer.from(value));
 const stamp = (field, seconds) => message(field, integer(1, seconds));
-// CortexStepGeneratorMetadata: chat_model = 1 { usage = 4, chat_start_metadata = 9 { created_at = 4 } }, step_indices = 2.
-const generation = ({ startedAt = 0, usage = [], steps = [] }) => Buffer.concat([
-  message(1, Buffer.concat([message(4, Buffer.concat(usage)), ...(startedAt ? [message(9, stamp(4, startedAt))] : [])])),
+// CortexStepGeneratorMetadata: chat_model = 1 { usage = 4, chat_start_metadata = 9 { created_at = 4 },
+// response_model = 19, model_display_name = 21 }, step_indices = 2.
+const generation = ({ startedAt = 0, usage = [], names = [], steps = [] }) => Buffer.concat([
+  message(1, Buffer.concat([message(4, Buffer.concat(usage)), ...(startedAt ? [message(9, stamp(4, startedAt))] : []), ...names])),
   ...steps,
 ]);
 const temporaryDirectory = t => {
@@ -38,18 +39,18 @@ test('a conversation database yields one dated record per answered request and i
   db.exec('PRAGMA journal_mode=WAL; CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, status INTEGER, metadata BLOB); CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB);');
   db.prepare('INSERT INTO steps VALUES (?,?,?,?)').run(7, 15, 3, stamp(1, 1760003600));
   const insert = db.prepare('INSERT INTO gen_metadata VALUES (?,?)');
-  insert.run(0, generation({ startedAt: 1760000000, usage: [integer(2, 100), integer(3, 40), integer(4, 50), integer(5, 900), integer(6, 3), text(7, 'message-1'), text(11, 'response-1')] }));
-  // No request start: dated by its first step, here in the packed form.
-  insert.run(1, generation({ usage: [integer(2, 10), integer(3, 5), text(7, 'message-2')], steps: [message(2, Buffer.concat([vi(7), vi(8)]))] }));
+  insert.run(0, generation({ startedAt: 1760000000, names: [text(19, 'gemini-3.8-flash-high'), text(21, 'Gemini 3.8 Flash (High)')], usage: [integer(2, 100), integer(3, 40), integer(4, 50), integer(5, 900), integer(6, 3), text(7, 'message-1'), text(11, 'response-1')] }));
+  // No request start: dated by its first step, here in the packed form. No display name either.
+  insert.run(1, generation({ names: [text(19, 'claude-sonnet-4-6')], usage: [integer(2, 10), integer(3, 5), text(7, 'message-2')], steps: [message(2, Buffer.concat([vi(7), vi(8)]))] }));
   // Its step is gone as well, so the request stays undated.
   insert.run(2, generation({ usage: [integer(5, 20)], steps: [integer(2, 9)] }));
   // A preflight row reports no consumption.
   insert.run(3, generation({ startedAt: 1760000000, usage: [integer(2, 0)] }));
   db.close();
   assert.deepEqual(readConversationUsage(path), [
-    { at: 1760000000000, id: 'r3:response-1', uncached: 100, cacheRead: 900, cacheWrite: 50, output: 40 },
-    { at: 1760003600000, id: 'm0:message-2', uncached: 10, cacheRead: 0, cacheWrite: 0, output: 5 },
-    { at: null, id: '', uncached: 0, cacheRead: 20, cacheWrite: 0, output: 0 },
+    { at: 1760000000000, id: 'r3:response-1', model: 'Gemini 3.8 Flash (High)', uncached: 100, cacheRead: 900, cacheWrite: 50, output: 40 },
+    { at: 1760003600000, id: 'm0:message-2', model: 'claude-sonnet-4-6', uncached: 10, cacheRead: 0, cacheWrite: 0, output: 5 },
+    { at: null, id: '', model: '', uncached: 0, cacheRead: 20, cacheWrite: 0, output: 0 },
   ]);
   assert.deepEqual(readdirSync(directory), ['conversation.db'], 'reading a closed conversation leaves no -wal or -shm file beside it');
 
@@ -63,17 +64,20 @@ test('a conversation database yields one dated record per answered request and i
   }
 });
 
-test('usage is added up per local day, and a response stored in two conversations counts once', () => {
-  const request = (at, id, uncached, output = 0) => ({ at, id, uncached, cacheRead: 0, cacheWrite: 0, output });
+test('usage is added up per local day and model, and a response stored in two conversations counts once', () => {
+  const request = (at, id, model, uncached, output = 0) => ({ at, id, model, uncached, cacheRead: 0, cacheWrite: 0, output });
   const summary = summarizeUsage([
-    request(noon(10, 12), '', 30),
-    request(noon(10, 11), 'r1:a', 100, 20),
-    request(noon(10, 11), '', 5),
-    request(noon(10, 11), 'r1:a', 100, 60), // the same response again, with its complete output
-    request(null, '', 7),
+    request(noon(10, 12), '', 'Gemini', 30),
+    request(noon(10, 11), 'r1:a', 'Gemini', 100, 20),
+    request(noon(10, 11), '', 'Claude', 5),
+    request(noon(10, 11), 'r1:a', 'Gemini', 100, 60), // the same response again, with its complete output
+    request(null, '', 'Gemini', 7),
   ]);
   assert.deepEqual(summary, {
-    days: [{ date: '2026-10-11', ...bucket(2, 105, 0, 0, 60) }, { date: '2026-10-12', ...bucket(1, 30, 0, 0, 0) }],
+    days: [
+      { date: '2026-10-11', ...bucket(2, 105, 0, 0, 60), models: [{ name: 'Claude', ...bucket(1, 5, 0, 0, 0) }, { name: 'Gemini', ...bucket(1, 100, 0, 0, 60) }] },
+      { date: '2026-10-12', ...bucket(1, 30, 0, 0, 0), models: [{ name: 'Gemini', ...bucket(1, 30, 0, 0, 0) }] },
+    ],
     undated: bucket(1, 7, 0, 0, 0),
   });
 });
@@ -85,7 +89,8 @@ test('conversation databases are read once, again only after they change, and ne
   writeFileSync(first, 'first');
   writeFileSync(second, 'second');
   writeFileSync(join(directory, 'notes.txt'), 'not a conversation');
-  const rows = { 'first.db': [{ at: noon(10, 11), id: '', uncached: 1, cacheRead: 0, cacheWrite: 0, output: 0 }], 'second.db': [{ at: noon(10, 11), id: '', uncached: 2, cacheRead: 0, cacheWrite: 0, output: 0 }] };
+  const row = uncached => ({ at: noon(10, 11), id: '', model: 'Gemini', uncached, cacheRead: 0, cacheWrite: 0, output: 0 });
+  const rows = { 'first.db': [row(1)], 'second.db': [row(2)] };
   const trace = [];
   let failing = '';
   const history = createUsageHistory({
@@ -142,10 +147,10 @@ const usageUi = () => { const ui = createPresentation(); return createUsagePrese
 // 2026-11-19 is a Thursday: its week began on Monday the 16th, and November began on a Sunday.
 const history = {
   days: [
-    { date: '2026-10-31', ...bucket(1, 7, 0, 0, 0) },
-    { date: '2026-11-15', ...bucket(1, 5, 0, 0, 0) },
-    { date: '2026-11-16', ...bucket(2, 10, 0, 0, 0) },
-    { date: '2026-11-19', ...bucket(3, 100, 900, 100, 400) },
+    { date: '2026-10-31', ...bucket(1, 7, 0, 0, 0), models: [{ name: 'Gemini 3.8 Flash', ...bucket(1, 7, 0, 0, 0) }] },
+    { date: '2026-11-15', ...bucket(1, 5, 0, 0, 0), models: [{ name: 'Gemini 3.8 Flash', ...bucket(1, 5, 0, 0, 0) }] },
+    { date: '2026-11-16', ...bucket(2, 10, 0, 0, 0), models: [{ name: '', ...bucket(1, 4, 0, 0, 0) }, { name: 'Gemini 3.8 Flash', ...bucket(1, 6, 0, 0, 0) }] },
+    { date: '2026-11-19', ...bucket(3, 100, 900, 100, 400), models: [{ name: 'Claude Sonnet 4.6', ...bucket(1, 50, 400, 100, 250) }, { name: 'Gemini 3.8 Flash', ...bucket(2, 50, 500, 0, 150) }] },
   ],
   undated: bucket(1, 3, 0, 0, 0),
 };
@@ -186,7 +191,53 @@ test('the activity block shows loading, empty and filled states in the display l
   assert.equal((ui.activityHtml(history, { today: '2026-11-19' }).match(/class="usage-heat-col"/g) || []).length, 53, 'a year of weeks; the style sheet drops the oldest in a narrow block');
 });
 
+test('usage by model pages through days, weeks and months, and a model keeps its colour from page to page', () => {
+  const ui = usageUi();
+  const days = ui.modelView(history, { today: '2026-11-19' });
+  assert.deepEqual([days.bars.length, days.bars[0].from, days.bars.at(-1).from], [14, '2026-11-06', '2026-11-19']);
+  assert.deepEqual(days.bars.at(-1).parts.slice(0, 3), [800, 700, 0]);
+  assert.deepEqual([days.tokens, days.requests, days.max, days.range, days.older, days.newer], [1515, 6, 1500, '2026-11-06 – 11-19', true, false]);
+  assert.deepEqual(days.models.map(model => [model.name, model.color, model.tokens, model.requests]), [['Claude Sonnet 4.6', '#388bfd', 800, 1], ['Gemini 3.8 Flash', '#e86a24', 711, 4], ['', '#00b386', 4, 1]]);
+
+  const earlier = ui.modelView(history, { today: '2026-11-19', shift: -1 });
+  assert.deepEqual([earlier.range, earlier.older, earlier.newer], ['2026-10-23 – 11-05', false, true]);
+  assert.deepEqual(earlier.models.map(model => [model.name, model.color, model.tokens]), [['Gemini 3.8 Flash', '#e86a24', 7]]);
+
+  const weeks = ui.modelView(history, { today: '2026-11-19', period: 'week' });
+  assert.deepEqual(weeks.bars.slice(-4).map(bar => [bar.label, bar.tokens]), [['10/26', 7], ['11/2', 0], ['11/9', 5], ['11/16', 1510]]);
+  assert.equal(weeks.range, '2026-08-31 – 11-22');
+
+  const months = ui.modelView(history, { today: '2026-11-19', period: 'month' });
+  assert.deepEqual(months.bars.slice(-2).map(bar => [bar.label, bar.from, bar.to, bar.tokens]), [['10', '2026-10-01', '2026-10-31', 7], ['11', '2026-11-01', '2026-11-30', 1515]]);
+  assert.equal(months.range, '2025-12 – 2026-11');
+
+  // More models than colours: the smallest ones share the last slot.
+  const crowd = { days: [{ date: '2026-11-19', ...bucket(8, 36, 0, 0, 0), models: Array.from({ length: 8 }, (_, index) => ({ name: 'Model ' + index, ...bucket(1, 8 - index, 0, 0, 0) })) }] };
+  assert.deepEqual(ui.modelView(crowd, { today: '2026-11-19' }).models.map(model => [model.name, model.tokens]), [['Model 0', 8], ['Model 1', 7], ['Model 2', 6], ['Model 3', 5], ['Model 4', 4], ['Model 5', 3], [null, 3]]);
+});
+
+test('the model block draws stacked bars, a paging control and one row per model', () => {
+  const ui = usageUi();
+  assert.match(ui.modelsHtml(null, { language: 'zh-CN' }), /正在读取本机对话…/);
+  const html = ui.modelsHtml(history, { today: '2026-11-19', language: 'zh-TW' });
+  assert.match(html, /data-usage-period="day" aria-pressed="true">日<\/button><button type="button" data-usage-period="week" aria-pressed="false">週</);
+  assert.match(html, /data-usage-shift="-1" aria-label="更早">‹<\/button><span class="usage-range">2026-11-06 – 11-19<\/span><button type="button" data-usage-shift="1" aria-label="更晚" disabled>›</);
+  assert.match(html, /title="1,515 tokens">1\.5K · 6 次請求</);
+  // Today's bar is the tallest and is split 800 : 700 between its two models.
+  assert.match(html, /title="2026-11-19 · 1,500 tokens · 3 次請求\nClaude Sonnet 4\.6: 800\nGemini 3\.8 Flash: 700"><span style="flex:0 0 0"><\/span><span class="usage-bar-stack" style="flex:1000 0 0"><i style="flex:533 0 0;background:#388bfd"><\/i><i style="flex:467 0 0;background:#e86a24"><\/i><\/span><span class="usage-bar-x">19<\/span>/);
+  assert.match(html, /title="非快取輸入 50 · 快取讀取 400 · 快取寫入 100 · 輸出 250 · 1 次請求"><span class="usage-dot" style="background:#388bfd"><\/span><span class="usage-model-name">Claude Sonnet 4\.6<\/span><span class="usage-model-share">53%<\/span><span class="usage-model-tokens">800<\/span>/);
+  assert.match(html, /<span class="usage-model-name">未知模型<\/span>/);
+  assert.match(ui.modelsHtml(history, { today: '2026-11-19', shift: -3, language: 'en' }), /No usage in this period\./);
+  const hostile = { days: [{ date: '2026-11-19', ...bucket(1, 1, 0, 0, 0), models: [{ name: '<img src=x onerror=alert(1)>', ...bucket(1, 1, 0, 0, 0) }] }] };
+  assert.doesNotMatch(ui.modelsHtml(hostile, { today: '2026-11-19' }), /<img/);
+});
+
 // The sidebar page script on the stand-in DOM, at a fixed noon, with answers the test can change.
+const snapshot = prefs => ({
+  contextTokens: 128000, maxContextTokens: 256000, cachedIn: 100000, lastStepEpochMs: noon(11, 19) - 20000,
+  prefs: { ...DEFAULT_SETTINGS, ...prefs },
+  quotaGroups: [{ displayName: 'Gemini Models', buckets: [{ window: '5h', remainingFraction: .58 }] }],
+});
 const openSidebar = async (data, usage) => {
   const dom = createStubDom({ page: true });
   dom.now = noon(11, 19);
@@ -197,9 +248,17 @@ const openSidebar = async (data, usage) => {
   };
   const context = vm.createContext({ ...dom.globals, fetch });
   vm.runInContext('globalThis.window = globalThis;', context);
-  let click = null;
+  let listener = null;
   const root = dom.document.getElementById('usage-root');
-  root.addEventListener = (type, listener) => { if (type === 'click') click = listener; };
+  root.addEventListener = (type, handler) => { if (type === 'click') listener = handler; };
+  // The controls inside the blocks are the only elements the page script focuses.
+  const focused = [];
+  const query = dom.document.querySelector;
+  dom.document.querySelector = selector => {
+    const element = query(selector);
+    if (selector.startsWith('[data-usage-')) element.focus = () => { focused.push(selector); };
+    return element;
+  };
   vm.runInContext(UI_HTML.slice(UI_HTML.lastIndexOf('<script>') + '<script>'.length, UI_HTML.lastIndexOf('</script>')), context);
   // The page starts its first poll itself, and the history is requested beside the poll rather
   // than within it: let whatever is under way finish.
@@ -208,17 +267,14 @@ const openSidebar = async (data, usage) => {
   const poll = async (seconds = 1) => { const before = dom.writes; dom.now += seconds * 1000; await dom.tick(); await settle(); return dom.writes - before; };
   // Counted only as POST: the SDK does not authenticate GET requests.
   const fetched = () => requests.filter(request => request === 'POST /api/usage').length;
-  return { dom, context, poll, fetched, root, block: dom.document.getElementById('usage-activity'), click: target => click({ target }) };
+  const click = dataset => listener({ target: { closest: () => ({ dataset, disabled: false }) } });
+  return { context, poll, fetched, focused, root, click, activity: dom.document.getElementById('usage-activity'), models: dom.document.getElementById('usage-models') };
 };
 
 test('the sidebar leaves the history alone while it is off and reads it about once a minute while it is shown', async () => {
-  const data = {
-    contextTokens: 128000, maxContextTokens: 256000, cachedIn: 100000, lastStepEpochMs: noon(11, 19) - 20000,
-    prefs: { ...DEFAULT_SETTINGS },
-    quotaGroups: [{ displayName: 'Gemini Models', buckets: [{ window: '5h', remainingFraction: .58 }] }],
-  };
+  const data = snapshot();
   const usage = { enabled: true, ...JSON.parse(JSON.stringify(history)) };
-  const { dom, context, poll, fetched, root, block, click } = await openSidebar(data, usage);
+  const { context, poll, fetched, focused, root, click, activity } = await openSidebar(data, usage);
   await poll();
   await poll();
   assert.equal(fetched(), 0);
@@ -227,10 +283,10 @@ test('the sidebar leaves the history alone while it is off and reads it about on
   data.prefs.showUsageActivity = true;
   await poll();
   assert.equal(root.hidden, false);
-  assert.match(block.innerHTML, /Reading local conversations…/);
+  assert.match(activity.innerHTML, /Reading local conversations…/);
   await poll();
   assert.equal(fetched(), 1);
-  assert.match(block.innerHTML, /<div class="usage-heat" data-scale="day"/);
+  assert.match(activity.innerHTML, /<div class="usage-heat" data-scale="day"/);
   await poll();
   assert.equal(await poll(), 0);
   assert.equal(fetched(), 1, 'not every second');
@@ -239,14 +295,12 @@ test('the sidebar leaves the history alone while it is off and reads it about on
   assert.equal(fetched(), 2);
   usage.days.at(-1).uncached += 1000;
   await poll(60);
-  assert.match(block.innerHTML, /title="2,500 tokens"><span>Today<\/span>/);
+  assert.match(activity.innerHTML, /title="2,500 tokens"><span>Today<\/span>/);
 
   // The control inside the block switches the view and keeps the keyboard focus on itself.
-  let focused = false;
-  dom.document.querySelector('[data-usage-scale="week"]').focus = () => { focused = true; };
-  click({ closest: () => ({ dataset: { usageScale: 'week' } }) });
-  assert.match(block.innerHTML, /<div class="usage-heat" data-scale="week"/);
-  assert.equal(focused, true);
+  click({ usageScale: 'week' });
+  assert.match(activity.innerHTML, /<div class="usage-heat" data-scale="week"/);
+  assert.deepEqual(focused, ['[data-usage-scale="week"]']);
 
   vm.runInContext("selectSidebarView('settings')", context);
   await poll(60);
@@ -256,11 +310,28 @@ test('the sidebar leaves the history alone while it is off and reads it about on
   assert.equal(fetched(), 4);
 });
 
-test('the history is an opt-in setting next to the other statistics, without a help dot of its own', () => {
+test('the model block shares the one history request and changes period and page without another', async () => {
+  const { poll, fetched, click, activity, models } = await openSidebar(snapshot({ showModelUsage: true }), { enabled: true, ...history });
+  await poll();
+  await poll();
+  assert.equal(fetched(), 1);
+  assert.equal(activity.hidden, true, 'the activity block stays off');
+  assert.match(models.innerHTML, /<span class="usage-range">2026-11-06 – 11-19<\/span>/);
+
+  click({ usageShift: '-1' });
+  assert.match(models.innerHTML, /<span class="usage-range">2026-10-23 – 11-05<\/span>/);
+  click({ usagePeriod: 'month' });
+  assert.match(models.innerHTML, /<span class="usage-range">2025-12 – 2026-11<\/span>/, 'a new period starts at the current page');
+  click({ usageShift: '1' });
+  assert.match(models.innerHTML, /<span class="usage-range">2025-12 – 2026-11<\/span>/, 'there is no page after today');
+  assert.equal(fetched(), 1);
+});
+
+test('both history blocks are opt-in settings next to the other statistics, without help dots of their own', () => {
   const settingsHtml = UI_HTML.slice(UI_HTML.indexOf('<section class="settings'));
-  const card = settingsHtml.indexOf('data-setting-card="showUsageActivity"');
-  assert.ok(settingsHtml.indexOf('data-preview-group="turn"') < card && card < settingsHtml.indexOf('data-setting-card="showQueueWarnings"'));
-  assert.match(settingsHtml, /data-setting-card="showUsageActivity" data-checked="false"/);
-  assert.match(UI_HTML, /<section class="stats-usage" id="usage-root" hidden>/);
-  assert.match(UI_HTML, /\.stats-usage\[hidden\] \{ display: none; \}/);
+  const activity = settingsHtml.indexOf('data-setting-card="showUsageActivity" data-checked="false"');
+  const models = settingsHtml.indexOf('data-setting-card="showModelUsage" data-checked="false"');
+  assert.ok(settingsHtml.indexOf('data-preview-group="turn"') < activity && activity < models && models < settingsHtml.indexOf('data-setting-card="showQueueWarnings"'));
+  assert.match(UI_HTML, /<section class="stats-usage" id="usage-root" hidden>\s*<div class="usage-block" id="usage-activity" hidden><\/div>\s*<div class="usage-block" id="usage-models" hidden><\/div>/);
+  assert.match(UI_HTML, /\.stats-usage\[hidden\], \.usage-block\[hidden\] \{ display: none; \}/);
 });
