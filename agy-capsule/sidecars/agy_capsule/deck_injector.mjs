@@ -86,11 +86,11 @@ function pageMount(d) {
   }
 
   // Upgrade or initialize DOM structure in-place
-  if (root.getAttribute('data-deck-ver') !== '115') {
+  if (root.getAttribute('data-deck-ver') !== '116') {
     release(root);
     root._pinnedGroup = null;
     root.removeAttribute('data-pinned');
-    root.setAttribute('data-deck-ver', '115');
+    root.setAttribute('data-deck-ver', '116');
     root._speedActivity = null;
     root._motionPrev = null;
     root._renderKey = null;
@@ -566,6 +566,7 @@ function pageMount(d) {
         #deck-metrics-strip[data-label-case="lowercase"] .dk-item-label,
         #deck-metrics-strip[data-label-case="lowercase"] .turn-bar-label,
         #deck-metrics-strip[data-label-case="lowercase"] .turn-bar-short,
+        #deck-metrics-strip[data-label-case="lowercase"] .tb-single-label,
         #deck-metrics-strip[data-label-case="lowercase"] .dk-q-label { text-transform: lowercase; }
         /* Context breakdown / turn metrics: columns (vertical lines) or rows (marker + label + values). */
         #deck-metrics-strip:not([data-context-layout="rows"]) .dk-item-pct { display: none; }
@@ -606,6 +607,56 @@ function pageMount(d) {
         @media (prefers-reduced-motion: no-preference) {
           #deck-metrics-strip[data-highlight-context-hover="true"] .dk-seg { transition: width 0.25s ease, opacity .18s ease; }
           #deck-metrics-strip[data-highlight-context-hover="true"] .dk-item-row { transition: opacity .18s ease; }
+        }
+        /* Optional compact status bar: the cache and the last request as one row along the panel's
+           lower edge. It takes the place of those two rows only; the rest of the panel is unchanged. */
+        #deck-metrics-strip .dk-telemetry-dock { display: none; }
+        #deck-metrics-strip[data-compact-telemetry-bar="true"] .dk-ctx-pop { overflow: hidden; }
+        #deck-metrics-strip[data-compact-telemetry-bar="true"] .dk-cache-bar,
+        #deck-metrics-strip[data-compact-telemetry-bar="true"] [data-generation-block] { display: none; }
+        #deck-metrics-strip[data-compact-telemetry-bar="true"] [data-generation-block] + [data-turn-metrics-block] { border-top: 1px solid var(--border, rgba(142, 142, 147, 0.24)); padding-top: var(--agy-section-gap); }
+        #deck-metrics-strip[data-compact-telemetry-bar="true"] .dk-telemetry-dock {
+          display: block;
+          margin: var(--agy-section-gap, 6px) calc(var(--agy-pad-x, 12px) * -1) calc(var(--agy-pad-y, 10px) * -1);
+          border-top: 1px solid color-mix(in srgb, var(--border, rgba(142, 142, 147, 0.24)) 64%, transparent);
+          background: color-mix(in srgb, var(--foreground, #18181b) 3%, transparent);
+          font-variant-numeric: tabular-nums;
+        }
+        #deck-metrics-strip .dk-telemetry-dock[data-mode="cache-only"] .tb-trio,
+        #deck-metrics-strip .dk-telemetry-dock[data-mode="trio"] .tb-single { display: none; }
+        #deck-metrics-strip .dk-telemetry-dock .tb-trio { display: grid; grid-template-columns: minmax(0, 0.84fr) minmax(0, 0.82fr) minmax(0, 1.44fr); }
+        #deck-metrics-strip .dk-telemetry-dock .tb-cell { position: relative; display: flex; align-items: center; justify-content: center; gap: 4.5px; padding: 6px 4px; min-width: 0; white-space: nowrap; }
+        #deck-metrics-strip .dk-telemetry-dock .tb-cell:hover { background-color: color-mix(in srgb, var(--foreground, #18181b) 4.5%, transparent); }
+        #deck-metrics-strip .dk-telemetry-dock .tb-cell + .tb-cell::before { content: ""; position: absolute; left: 0; top: 50%; transform: translateY(-50%); width: 1px; height: 12px; border-radius: 1px; background: color-mix(in srgb, var(--border, rgba(142, 142, 147, 0.24)) 70%, transparent); }
+        #deck-metrics-strip .dk-telemetry-dock .tb-single { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px var(--agy-pad-x, 12px); }
+        #deck-metrics-strip .dk-telemetry-dock .tb-single-left { display: inline-flex; align-items: center; gap: 5px; min-width: 0; white-space: nowrap; }
+        #deck-metrics-strip .dk-telemetry-dock .tb-single-right { display: inline-flex; align-items: baseline; gap: 7px; flex-shrink: 0; white-space: nowrap; }
+        #deck-metrics-strip .dk-telemetry-dock .tb-icon { display: inline-flex; align-items: center; flex-shrink: 0; }
+        #deck-metrics-strip .dk-telemetry-dock .tb-svg { opacity: .7; }
+        #deck-metrics-strip .dk-telemetry-dock .tb-val { font-weight: 500; color: var(--foreground, #18181b); color: color-mix(in srgb, var(--foreground, #18181b) 88%, transparent); }
+        #deck-metrics-strip .dk-telemetry-dock .tb-ttft .tb-val,
+        #deck-metrics-strip .dk-telemetry-dock .tb-unit { font-weight: 400; color: var(--muted-foreground, #8e8e93); }
+        /* The cache state tints the cache's end of the bar and colors its value. */
+        #deck-metrics-strip .dk-telemetry-dock[data-cache-status="fresh"] .tb-cache { background-image: linear-gradient(90deg, color-mix(in srgb, #4ea84e 9%, transparent), transparent); }
+        #deck-metrics-strip .dk-telemetry-dock[data-cache-status="warning"] .tb-cache { background-image: linear-gradient(90deg, color-mix(in srgb, #d4940a 11%, transparent), transparent); }
+        #deck-metrics-strip .dk-telemetry-dock[data-cache-status="cold"] .tb-cache { background-image: linear-gradient(90deg, color-mix(in srgb, #e06c75 10%, transparent), transparent); }
+        #deck-metrics-strip .dk-telemetry-dock[data-cache-status="fresh"] .tb-single { background-image: linear-gradient(90deg, color-mix(in srgb, #4ea84e 8%, transparent), transparent 42%); }
+        #deck-metrics-strip .dk-telemetry-dock[data-cache-status="warning"] .tb-single { background-image: linear-gradient(90deg, color-mix(in srgb, #d4940a 9%, transparent), transparent 42%); }
+        #deck-metrics-strip .dk-telemetry-dock[data-cache-status="cold"] .tb-single { background-image: linear-gradient(90deg, color-mix(in srgb, #e06c75 9%, transparent), transparent 42%); }
+        #deck-metrics-strip .dk-telemetry-dock[data-cache-status="warning"] .tb-cache .tb-val,
+        #deck-metrics-strip .dk-telemetry-dock[data-cache-status="warning"] .tb-single .tb-val,
+        #deck-metrics-strip .dk-telemetry-dock[data-cache-status="warning"] .tb-single-sub { color: #d4940a; }
+        #deck-metrics-strip .dk-telemetry-dock[data-cache-status="cold"] .tb-cache .tb-val,
+        #deck-metrics-strip .dk-telemetry-dock[data-cache-status="cold"] .tb-single .tb-val { opacity: .46; }
+        #deck-metrics-strip .dk-telemetry-dock[data-cache-status="cold"] .tb-single-sub { color: #e06c75; }
+        #deck-metrics-strip .dk-telemetry-dock[data-cache-status="idle"] .tb-cache .tb-val,
+        #deck-metrics-strip .dk-telemetry-dock[data-cache-status="idle"] .tb-single .tb-val { font-weight: 400; color: var(--muted-foreground, #8e8e93); }
+        /* The bolt takes the speed's color, by the capsule's own thresholds. */
+        #deck-metrics-strip .dk-telemetry-dock .tb-speed[data-speed-tier="green"] .tb-svg { color: light-dark(#16a34a, #4ea84e); opacity: .9; }
+        #deck-metrics-strip .dk-telemetry-dock .tb-speed[data-speed-tier="yellow"] .tb-svg { color: light-dark(#d97706, #d4940a); opacity: .9; }
+        #deck-metrics-strip .dk-telemetry-dock .tb-speed[data-speed-tier="red"] .tb-svg { color: light-dark(#dc2626, #e06c75); opacity: .9; }
+        @media (prefers-reduced-motion: no-preference) {
+          #deck-metrics-strip .dk-telemetry-dock .tb-cell { transition: background-color .14s ease; }
         }
       </style>
 
@@ -655,6 +706,7 @@ function pageMount(d) {
             ${presentation.generationMarkup()}
           </div>
           ${presentation.turnMetricsMarkup('dk-generation')}
+          ${presentation.telemetryBarMarkup('dk-telemetry-dock')}
           </div>
         </div>
       </div>
@@ -818,6 +870,7 @@ function pageMount(d) {
     root._onResize = () => root._scheduleLayout?.();
     window.addEventListener('resize', root._onResize);
     root.querySelector('[data-el="rowCacheHit"]').addEventListener('mouseenter', () => root._refreshCacheTooltip?.());
+    root.querySelector('[data-telemetry-bar]').addEventListener('mouseenter', () => root._paintStatusBar?.());
   }
 
   // The expiry ring or bar advances with the clock, so it is painted on its own and never forces
@@ -871,6 +924,12 @@ function pageMount(d) {
   root._refreshCacheTooltip();
   presentation.renderGeneration(root.querySelector('.dk-ctx-pop'), d.generation, labels, d.prefs);
   presentation.renderTurnMetrics(root, d.turnMetrics, labels, d.prefs);
+  // The compact status bar is computed only while it is shown. Like the Cache row it repaints
+  // when the pointer enters it, because its cache tooltip states an age.
+  root._paintStatusBar = () => {
+    if (d.prefs.compactTelemetryBar === true) presentation.renderTelemetryBar(root.querySelector('.dk-ctx-pop'), d.cache, d.generation, labels, d.prefs, Date.now());
+  };
+  root._paintStatusBar();
   const pillSpeed = root.querySelector('[data-el="pillSpeed"]');
   const tps = d.turnSpeed?.generation?.tps;
   // Turn scope comes from persisted USER_INPUT, not cancel-button appearance.

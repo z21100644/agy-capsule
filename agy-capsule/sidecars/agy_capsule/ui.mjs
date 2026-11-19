@@ -86,6 +86,7 @@ export function createPresentation(turnFactory = createTurnPresentation) {
       labelCase: 'Label casing', lowercase: 'Lowercase', titlecase: 'Title case',
       contextLayout: 'Context breakdown', turnLayout: 'Turn metrics style', layoutColumns: 'Columns', layoutRows: 'Rows', contextMarker: 'Context marker', turnMarker: 'Turn marker', showContextBreakdown: 'Context breakdown', markerSquare: 'Square', markerDot: 'Dot',
       highlightContextHover: 'Breakdown hover highlight',
+      compactTelemetryBar: 'Compact status bar', cacheColdShort: 'Cold',
       columnLabel: 'Names in columns', columnValue: 'Values in columns', columnPercent: 'Percentages in columns', fieldName: 'Name', fieldValue: 'Value', fieldPercent: '%', fieldDragTip: 'Drag to reorder; the switch hides or shows this line.',
       resetFormat: 'Reset countdown', compactTime: 'Compact', localizedTime: 'Localized', localizedTimeSample: '4 hr 55 min',
       resetDay: '{n} d', resetHour: '{n} hr', resetMinute: '{n} min', resetMinuteOnly: '{n} min', resetJoin: ' ',
@@ -173,6 +174,7 @@ export function createPresentation(turnFactory = createTurnPresentation) {
       labelCase: '面板大小写', lowercase: '全小写', titlecase: '首字母大写',
       contextLayout: '上下文明细', turnLayout: '本轮统计样式', layoutColumns: '竖线', layoutRows: '横条', contextMarker: '上下文标记', turnMarker: '本轮标记', showContextBreakdown: '上下文明细', markerSquare: '方块', markerDot: '圆点',
       highlightContextHover: '明细悬停高亮',
+      compactTelemetryBar: '精简状态栏', cacheColdShort: '已冷却',
       columnLabel: '竖线显示名称', columnValue: '竖线显示数值', columnPercent: '竖线显示百分比', fieldName: '名称', fieldValue: '数值', fieldPercent: '百分比', fieldDragTip: '拖动调整顺序，开关控制这一行显示或隐藏。',
       resetFormat: '重置倒计时', compactTime: '简写', localizedTime: '本地化', localizedTimeSample: '4小时55分',
       resetDay: '{n}天', resetHour: '{n}小时', resetMinute: '{n}分', resetMinuteOnly: '{n}分钟', resetJoin: '',
@@ -260,6 +262,7 @@ export function createPresentation(turnFactory = createTurnPresentation) {
       labelCase: '面板大小寫', lowercase: '全小寫', titlecase: '首字母大寫',
       contextLayout: '上下文明細', turnLayout: '本輪統計樣式', layoutColumns: '豎線', layoutRows: '橫條', contextMarker: '上下文標記', turnMarker: '本輪標記', showContextBreakdown: '上下文明細', markerSquare: '方塊', markerDot: '圓點',
       highlightContextHover: '明細懸停凸顯',
+      compactTelemetryBar: '精簡狀態欄', cacheColdShort: '已冷卻',
       columnLabel: '豎線顯示名稱', columnValue: '豎線顯示數值', columnPercent: '豎線顯示百分比', fieldName: '名稱', fieldValue: '數值', fieldPercent: '百分比', fieldDragTip: '拖動調整順序，開關控制這一行顯示或隱藏。',
       resetFormat: '重設倒數', compactTime: '簡寫', localizedTime: '在地化', localizedTimeSample: '4小時55分',
       resetDay: '{n}天', resetHour: '{n}小時', resetMinute: '{n}分', resetMinuteOnly: '{n}分鐘', resetJoin: '',
@@ -610,8 +613,73 @@ export function createPresentation(turnFactory = createTurnPresentation) {
     for (const block of root.querySelectorAll('[data-generation-block]')) block.hidden = prefs.showRequestMetrics === false || !generation || generation.requestIndex == null;
     return view;
   }
+  // The compact status bar's cache ring: the hit rate as an arc in the cache state's color. A cold
+  // cache is a dashed outline instead.
+  function makeTelemetryCacheRingSvg(progress, status = 'fresh') {
+    if (status === 'cold') return '<svg width="12" height="12" viewBox="0 0 18 18" style="flex-shrink: 0;"><circle cx="9" cy="9" r="6.5" fill="none" stroke="#e06c75" stroke-width="2.2" stroke-dasharray="3 2.83" opacity="0.88"/></svg>';
+    return makeCacheRingSvg(status === 'idle' ? 0 : progress, status === 'warning' ? '#d4940a' : '#4ea84e', 12);
+  }
+  // Optional compact status bar: the Cache row and the Last request row in one. With no request
+  // to show it is a single cache row.
+  function telemetryBarView(cacheData = {}, generation = null, prefs = {}, t = dictionaries.en, nowMs = Date.now()) {
+    const cache = cacheView(cacheData, prefs, nowMs);
+    const context = Number(cacheData?.contextTokens) || 0;
+    const cached = Number(cacheData?.cachedIn) || 0;
+    const cacheStatus = context > 0 ? cache.status : 'idle';
+    const request = generationText(generation || {}, t);
+    const tps = generation?.tps;
+    const hasSpeed = Number.isFinite(tps) && tps >= 0;
+    return {
+      mode: prefs?.showRequestMetrics !== false && generation?.requestIndex != null ? 'trio' : 'cache-only',
+      cacheStatus,
+      cacheRingSvg: makeTelemetryCacheRingSvg(context > 0 ? cached / context : 0, cacheStatus),
+      // Close to expiry the time left says more than the rate, so it takes the rate's place.
+      cacheValue: cacheStatus === 'warning' && cache.countdown ? cache.countdown : cache.text,
+      cachePct: cache.text,
+      cacheSub: cacheStatus === 'cold' ? t.cacheColdShort : cacheStatus === 'warning' ? cache.countdown : formatTokens(cached),
+      cacheTitle: cacheTooltip(cacheData, t, nowMs, prefs),
+      ttft: request.ttft,
+      ttftTitle: request.timingTitle,
+      speedNum: !hasSpeed ? '—' : tps >= 99.95 ? String(Math.round(tps)) : tps.toFixed(1),
+      speedUnit: hasSpeed ? ' tok/s' : '',
+      speedTier: !hasSpeed ? 'unknown' : tps >= 25 ? 'green' : tps >= 10 ? 'yellow' : 'red',
+      speedTitle: request.speedTitle,
+    };
+  }
+  function telemetryBarMarkup(className = 'telemetry-dock') {
+    const icon = shape => `<svg class="tb-icon tb-svg" width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${shape}</svg>`;
+    return `<div class="${className}" data-telemetry-bar data-mode="cache-only" data-cache-status="idle">`
+      + `<div class="tb-trio">`
+      + `<div class="tb-cell tb-cache" data-telemetry-slot="cache"><span class="tb-icon" data-telemetry="cacheRing" aria-hidden="true"></span><span class="tb-val" data-telemetry="cacheValue">0%</span></div>`
+      + `<div class="tb-cell tb-ttft" data-telemetry-slot="ttft">${icon('<line x1="5.4" y1="1.3" x2="8.6" y2="1.3"/><circle cx="7" cy="7.8" r="4.6"/><polyline points="7 5.4 7 7.8 8.7 8.9"/>')}<span class="tb-val" data-telemetry="ttft">—</span></div>`
+      + `<div class="tb-cell tb-speed" data-telemetry-slot="speed" data-speed-tier="unknown">${icon('<path d="M7.8 1.5L3.2 7.8h3.5L6.2 12.5 10.8 6.2H7.3l.5-4.7z"/>')}<span class="tb-val"><span data-telemetry="speedNum">—</span><span class="tb-unit" data-telemetry="speedUnit"></span></span></div>`
+      + `</div>`
+      + `<div class="tb-single" data-telemetry-slot="cacheSingle"><span class="tb-single-left"><span class="tb-icon" data-telemetry="cacheRingSingle" aria-hidden="true"></span><span class="tb-single-label" data-i18n="cache">Cache</span></span><span class="tb-single-right"><span class="tb-single-sub" data-telemetry="cacheSub">0</span><span class="tb-val" data-telemetry="cachePct">0%</span></span></div>`
+      + `</div>`;
+  }
+  function renderTelemetryBar(root, cacheData, generation, labels, prefs = {}, nowMs = Date.now()) {
+    const view = telemetryBarView(cacheData, generation, prefs, labels, nowMs);
+    const bar = root?.querySelector('[data-telemetry-bar]');
+    if (!bar) return view;
+    const part = name => bar.querySelector(`[data-telemetry="${name}"]`);
+    const slot = name => bar.querySelector(`[data-telemetry-slot="${name}"]`);
+    const setText = (node, value) => { if (node && node.textContent !== value) node.textContent = value; };
+    const setTitle = (node, value) => { if (node && node.title !== value) node.title = value; };
+    // The DOM serializes SVG differently, so the markup last written is kept on the node.
+    const setSvg = (node, svg) => { if (node && node._svg !== svg) node.innerHTML = node._svg = svg; };
+    if (bar.dataset.mode !== view.mode) bar.dataset.mode = view.mode;
+    if (bar.dataset.cacheStatus !== view.cacheStatus) bar.dataset.cacheStatus = view.cacheStatus;
+    for (const key of ['cacheRing', 'cacheRingSingle']) setSvg(part(key), view.cacheRingSvg);
+    for (const key of ['cacheValue', 'cachePct', 'cacheSub', 'ttft', 'speedNum', 'speedUnit']) setText(part(key), view[key]);
+    for (const key of ['cache', 'cacheSingle']) setTitle(slot(key), view.cacheTitle);
+    setTitle(slot('ttft'), view.ttftTitle);
+    const speed = slot('speed');
+    setTitle(speed, view.speedTitle);
+    if (speed && speed.dataset.speedTier !== view.speedTier) speed.dataset.speedTier = view.speedTier;
+    return view;
+  }
   function appearance(prefs = {}) {
-    return { uiSkin: prefs.uiSkin === 'frosted' ? 'frosted' : 'native', panelLayout: prefs.panelLayout || 'natural', density: prefs.density || 'compact', quotaIndicator: prefs.quotaIndicator || 'ring', cacheIndicator: ['ring', 'bar'].includes(prefs.cacheIndicator) ? prefs.cacheIndicator : 'icon', cacheHitFormat: ['ring', 'both'].includes(prefs.cacheHitFormat) ? prefs.cacheHitFormat : 'percent', labelCase: prefs.labelCase || 'lowercase', resetFormat: prefs.resetFormat === 'localized' ? 'localized' : 'compact', contextLayout: prefs.contextLayout === 'rows' ? 'rows' : 'columns', turnLayout: prefs.turnLayout === 'rows' ? 'rows' : 'columns', contextMarker: prefs.contextMarker === 'dot' ? 'dot' : 'square', turnMarker: prefs.turnMarker === 'dot' ? 'dot' : 'square', showContextBreakdown: String(prefs.showContextBreakdown !== false), columnLabel: String(prefs.columnLabel !== false), columnValue: String(prefs.columnValue !== false), columnPercent: String(prefs.columnPercent === true), showQuotaDividers: String(prefs.showQuotaDividers !== false), popAnimation: String(prefs.popAnimation === true), highlightContextHover: String(prefs.highlightContextHover === true) };
+    return { uiSkin: prefs.uiSkin === 'frosted' ? 'frosted' : 'native', panelLayout: prefs.panelLayout || 'natural', density: prefs.density || 'compact', quotaIndicator: prefs.quotaIndicator || 'ring', cacheIndicator: ['ring', 'bar'].includes(prefs.cacheIndicator) ? prefs.cacheIndicator : 'icon', cacheHitFormat: ['ring', 'both'].includes(prefs.cacheHitFormat) ? prefs.cacheHitFormat : 'percent', labelCase: prefs.labelCase || 'lowercase', resetFormat: prefs.resetFormat === 'localized' ? 'localized' : 'compact', contextLayout: prefs.contextLayout === 'rows' ? 'rows' : 'columns', turnLayout: prefs.turnLayout === 'rows' ? 'rows' : 'columns', contextMarker: prefs.contextMarker === 'dot' ? 'dot' : 'square', turnMarker: prefs.turnMarker === 'dot' ? 'dot' : 'square', showContextBreakdown: String(prefs.showContextBreakdown !== false), columnLabel: String(prefs.columnLabel !== false), columnValue: String(prefs.columnValue !== false), columnPercent: String(prefs.columnPercent === true), showQuotaDividers: String(prefs.showQuotaDividers !== false), popAnimation: String(prefs.popAnimation === true), highlightContextHover: String(prefs.highlightContextHover === true), compactTelemetryBar: String(prefs.compactTelemetryBar === true) };
   }
   function formatReset(isoStr, prefs = {}, now = Date.now()) {
     if (!isoStr) return '';
@@ -664,7 +732,7 @@ export function createPresentation(turnFactory = createTurnPresentation) {
     return t;
   }
   const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  return { version: 73, dictionaries, locale, systemLocale, apply, appearance, formatReset, escapeHtml, formatTokens, cacheThresholds, makeCacheRingSvg, cacheTooltip, cacheView, contextBreakdown, contextTooltips, renderContextTooltips, quotaTooltip, applyQuotaTooltips, quotaColor, makeRingSvg, formatGroupTitle, formatBucketLabel, activeGroupColor, quotaView, alertView, renderAlerts, generationText, generationMarkup, renderGeneration, ...turnMethods };
+  return { version: 74, dictionaries, locale, systemLocale, apply, appearance, formatReset, escapeHtml, formatTokens, cacheThresholds, makeCacheRingSvg, makeTelemetryCacheRingSvg, cacheTooltip, cacheView, contextBreakdown, contextTooltips, renderContextTooltips, quotaTooltip, applyQuotaTooltips, quotaColor, makeRingSvg, formatGroupTitle, formatBucketLabel, activeGroupColor, quotaView, alertView, renderAlerts, generationText, generationMarkup, renderGeneration, telemetryBarView, telemetryBarMarkup, renderTelemetryBar, ...turnMethods };
 }
 
-export const getPresentationScript = () => `if (globalThis.__agyCapsulePresentation?.version !== 73) globalThis.__agyCapsulePresentation = (${createPresentation.toString()})(${createTurnPresentation.toString()});`;
+export const getPresentationScript = () => `if (globalThis.__agyCapsulePresentation?.version !== 74) globalThis.__agyCapsulePresentation = (${createPresentation.toString()})(${createTurnPresentation.toString()});`;

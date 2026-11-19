@@ -681,3 +681,57 @@ test('the cache hit rate can be drawn as a ring that replaces the percentage or 
   assert.ok(settingsHtml.indexOf('data-setting-card="cacheIndicator"') < settingsHtml.indexOf('data-setting-card="cacheHitFormat"'));
   assert.ok(settingsHtml.indexOf('data-setting-card="cacheHitFormat"') < settingsHtml.indexOf('data-settings-scope="features"'));
 });
+
+test('the compact status bar is opt-in and stands in for the Cache row and the last request', () => {
+  assert.equal(DEFAULT_SETTINGS.compactTelemetryBar, false);
+  const ui = createPresentation();
+  assert.equal(ui.appearance({}).compactTelemetryBar, 'false');
+  assert.equal(ui.appearance({ compactTelemetryBar: true }).compactTelemetryBar, 'true');
+
+  const now = 1700000000000;
+  const cache = { contextTokens: 82000, cachedIn: 77100, lastStepEpochMs: now };
+  const request = { requestIndex: 4, ttft: 1, streaming: 2, duration: 3, output: 300, reply: 200, thinking: 100, tps: 100 };
+  const t = ui.dictionaries['zh-TW'];
+  const pick = (view, ...keys) => keys.map(key => view[key]);
+
+  // Fresh: hit rate, time to first token and speed. The ring's arc is the hit rate (94% of 40.84).
+  const fresh = ui.telemetryBarView(cache, request, {}, t, now + 30000);
+  assert.deepEqual(pick(fresh, 'mode', 'cacheStatus', 'cacheValue', 'cacheSub', 'ttft', 'speedNum', 'speedUnit', 'speedTier'), ['trio', 'fresh', '94%', '77.1K', '1.0s', '100', ' tok/s', 'green']);
+  assert.match(fresh.cacheRingSvg, /width="12"[^]*stroke="#4ea84e"[^>]*stroke-dashoffset="2\.44"/);
+  assert.equal(ui.telemetryBarView(cache, { ...request, tps: 99.96 }, {}, t, now).speedNum, '100', 'three digits drop the decimal');
+
+  // Close to expiry the time left takes the rate's place; the speed's color follows the capsule's tiers.
+  const warning = ui.telemetryBarView(cache, { ...request, tps: 18.4 }, {}, t, now + 200000);
+  assert.deepEqual(pick(warning, 'cacheStatus', 'cacheValue', 'cachePct', 'cacheSub', 'speedNum', 'speedTier'), ['warning', '~1m', '94%', '~1m', '18.4', 'yellow']);
+  assert.match(warning.cacheRingSvg, /stroke="#d4940a"/);
+
+  // Cold: the rate is back, next to a dashed red outline.
+  const cold = ui.telemetryBarView(cache, { ...request, tps: 7.2 }, {}, t, now + 300000);
+  assert.deepEqual(pick(cold, 'cacheStatus', 'cacheValue', 'cacheSub', 'speedNum', 'speedTier'), ['cold', '94%', '已冷卻', '7.2', 'red']);
+  assert.match(cold.cacheRingSvg, /stroke="#e06c75"[^>]*stroke-dasharray="3 2\.83"/);
+
+  // Without a request to show, or with Last request switched off, the bar is a single cache row.
+  const idle = ui.telemetryBarView({ contextTokens: 0, cachedIn: 0, lastStepEpochMs: 0 }, null, {}, ui.dictionaries.en, now);
+  assert.deepEqual(pick(idle, 'mode', 'cacheStatus', 'speedNum', 'speedUnit', 'speedTier'), ['cache-only', 'idle', '—', '', 'unknown']);
+  assert.doesNotMatch(idle.cacheRingSvg, /stroke-dashoffset/);
+  assert.deepEqual(pick(ui.telemetryBarView(cache, request, { showRequestMetrics: false }, ui.dictionaries.en, now + 300000), 'mode', 'cacheSub'), ['cache-only', 'Cold']);
+
+  // Off, the bar is not displayed. On, it hides exactly those two rows and touches nothing else in the panel.
+  const deck = readFileSync(new URL('../agy-capsule/sidecars/agy_capsule/deck_injector.mjs', import.meta.url), 'utf8');
+  assert.match(deck, /presentation\.telemetryBarMarkup\('dk-telemetry-dock'\)/);
+  assert.match(UI_HTML, /<div class="telemetry-dock" data-telemetry-bar /);
+  assert.match(deck, /#deck-metrics-strip \.dk-telemetry-dock \{ display: none; \}/);
+  assert.match(deck, /#deck-metrics-strip\[data-compact-telemetry-bar="true"\] \.dk-cache-bar,\s*#deck-metrics-strip\[data-compact-telemetry-bar="true"\] \[data-generation-block\] \{ display: none; \}/);
+  assert.doesNotMatch(deck, /\[data-compact-telemetry-bar="true"\][^{]*(\.dk-summary-row|\.dk-used|\.dk-track|\.dk-list|\.dk-item)/);
+  assert.match(UI_HTML, /\.telemetry-dock \{ display: none; \}/);
+  assert.match(UI_HTML, /body\[data-compact-telemetry-bar="true"\] \.panel \.cache-bar,\s*body\[data-compact-telemetry-bar="true"\] \.panel \[data-generation-block\] \{ display: none; \}/);
+  assert.doesNotMatch(UI_HTML, /\[data-compact-telemetry-bar="true"\][^{]*(\.summary-row|\.used-|\.progress-track|\.list|\.item-)/);
+  // The turn metrics keep their separator although the row before them is gone: the rule that
+  // restores it has to outrank the one that drops it after a visible Last request row.
+  assert.match(deck, /\[data-compact-telemetry-bar="true"\] \[data-generation-block\] \+ \[data-turn-metrics-block\] \{ border-top: 1px solid/);
+  assert.match(UI_HTML, /body\[data-compact-telemetry-bar="true"\] \.panel \[data-generation-block\] \+ \[data-turn-metrics-block\] \{ border-top: 1px solid/);
+
+  const settingsHtml = UI_HTML.slice(UI_HTML.indexOf('<section class="settings'));
+  const card = settingsHtml.indexOf('data-setting-card="compactTelemetryBar" data-checked="false"');
+  assert.ok(settingsHtml.indexOf('data-setting-card="showRequestMetrics"') < card && card < settingsHtml.indexOf('data-setting-card="showTurnMetrics"'));
+});

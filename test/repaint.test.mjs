@@ -76,6 +76,18 @@ test('the footer strip is repainted only when what it shows or where it sits cha
   assert.equal(second(), 0);
   controls._rect = { ...controls._rect, left: 180 };
   assert.ok(second() > 0);
+
+  // The compact status bar is drawn only while it is switched on, and then keeps to the same rule.
+  // By now the cache is close to expiry, so the time left stands where its hit rate was.
+  const bar = strip.querySelector('.dk-ctx-pop').querySelector('[data-telemetry-bar]');
+  const shown = () => [bar.dataset.mode, bar.dataset.cacheStatus, bar.querySelector('[data-telemetry="cacheValue"]').textContent, bar.querySelector('[data-telemetry="speedNum"]').textContent];
+  const request = { requestIndex: 2, ttft: 1, streaming: 2, duration: 3, output: 300, tps: 100 };
+  apply({ ...data, generation: request });
+  assert.deepEqual(shown(), [undefined, undefined, '', ''], 'nothing is computed for the bar while it is off');
+  apply({ ...data, generation: request, prefs: { ...data.prefs, compactTelemetryBar: true } });
+  assert.equal(strip.dataset.compactTelemetryBar, 'true');
+  assert.deepEqual(shown(), ['trio', 'warning', '~1m', '100']);
+  assert.equal(second() + second(), 0, 'an idle second writes nothing to the bar either');
 });
 
 test('the sidebar repaints only when its data or settings changed', async () => {
@@ -100,6 +112,14 @@ test('the sidebar repaints only when its data or settings changed', async () => 
   const width = fill.style.width;
   assert.ok(await poll() <= 2);
   assert.notEqual(fill.style.width, width);
+
+  // The compact status bar is drawn only while it is switched on: here as a single cache row.
+  const bar = dom.document.querySelector('.panel').querySelector('[data-telemetry-bar]');
+  const cached = bar.querySelector('[data-telemetry="cacheSub"]');
+  assert.deepEqual([bar.dataset.mode, cached.textContent], [undefined, ''], 'nothing is computed for the bar while it is off');
+  data.prefs.compactTelemetryBar = true;
+  await poll();
+  assert.deepEqual([bar.dataset.mode, cached.textContent], ['cache-only', '100K']);
 });
 
 test('statistics behind the settings tab are not refreshed and catch up when it is left', async () => {

@@ -18,7 +18,7 @@ import { createUsageHistory } from './usage_history.mjs';
 import { createUsagePresentation } from './usage_ui.mjs';
 
 const settingsStore = createSettingsStore();
-const PANEL_VERSION = 118;
+const PANEL_VERSION = 119;
 const presentation = createPresentation();
 export function getNotifyText(shortcutState, prefs) {
   const t = presentation.dictionaries[prefs?.settingsLanguage] || presentation.dictionaries['zh-CN'];
@@ -550,6 +550,10 @@ const PV_SVG = {
   ring: '<svg width="13" height="13" viewBox="0 0 18 18" style="transform:rotate(-90deg);flex-shrink:0"><circle cx="9" cy="9" r="6.5" fill="none" stroke="rgba(142,142,147,0.28)" stroke-width="2.4"/><circle cx="9" cy="9" r="6.5" fill="none" stroke="#4ea84e" stroke-width="2.4" stroke-linecap="round" stroke-dasharray="40.84" stroke-dashoffset="6.1"/></svg>',
   // The real hit-rate ring, so the swatches cannot drift from what the panels draw.
   hitRing: presentation.makeCacheRingSvg(.78, 'currentColor', 13),
+  // The compact status bar's preview: its real cache ring, and its two icons in the preview's size.
+  tbCache: presentation.makeTelemetryCacheRingSvg(.94, 'fresh'),
+  tbTimer: '<svg width="11" height="11" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;opacity:.68"><line x1="5.4" y1="1.3" x2="8.6" y2="1.3"/><circle cx="7" cy="7.8" r="4.6"/><polyline points="7 5.4 7 7.8 8.7 8.9"/></svg>',
+  tbZap: '<svg width="11" height="11" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;color:light-dark(#16a34a, #4ea84e);opacity:.9"><path d="M7.8 1.5L3.2 7.8h3.5L6.2 12.5 10.8 6.2H7.3l.5-4.7z"/></svg>',
 };
 
 const PV_CARD_PREVIEW = {
@@ -592,6 +596,14 @@ const PV_CARD_PREVIEW = {
   </div>`,
   showRequestMetrics: `<div class="pv-req-line">
     <div class="pv-pill pv-req-pill"><span>TTFT 1.0s–3.0s</span><span><b>100.0 tok/s</b></span></div>
+  </div>`,
+  compactTelemetryBar: `<div class="pv-tbar-card">
+    <div class="pv-tbar-body"><span class="pv-tbar-track"><i style="width:18%;background:#d4940a"></i><i style="width:24%;background:#388bfd"></i><i style="width:8%;background:#00b386"></i><i style="width:12%;background:#e86a24"></i></span></div>
+    <div class="pv-tbar-dock">
+      <span class="pv-tbar-cell pv-tbar-cache">${PV_SVG.tbCache}<b>94%</b></span>
+      <span class="pv-tbar-cell">${PV_SVG.tbTimer}<span>1.0s</span></span>
+      <span class="pv-tbar-cell">${PV_SVG.tbZap}<b>100<i class="pv-tbar-u"> tok/s</i></b></span>
+    </div>
   </div>`,
   showUsageActivity: `<div class="pv-usage-heat">${[0, 1, 0, 2, 3, 1, 0, 4, 2, 1, 3, 0, 1, 2, 4, 3, 1, 2].map(level => `<i class="usage-cell" data-level="${level}"></i>`).join('')}</div>`,
   showModelUsage: `<div class="pv-usage-bars">${[[5, 3], [8, 2], [4, 6], [9, 5], [6, 2], [10, 7], [7, 4], [3, 2]].map(([lower, upper]) => `<span><i style="height:${upper}px;background:#e86a24"></i><i style="height:${lower}px;background:#388bfd"></i></span>`).join('')}</div>`,
@@ -1096,6 +1108,18 @@ const UI_HTML = `<!DOCTYPE html>
     .pv-req-pill { flex: 1; display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 4px 8px; transition: opacity .18s ease; }
     .pv-req-pill b { font-weight: 500; color: color-mix(in srgb, var(--foreground, #ebebeb) 88%, transparent); }
     [data-setting-card="showRequestMetrics"][data-checked="false"] .pv-req-pill { opacity: .38; }
+    /* Compact status bar: a miniature panel with the bar along its lower edge. */
+    .pv-tbar-card { display: flex; flex-direction: column; border-radius: 6px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--border, rgba(142,142,147,.28)) 70%, transparent); background: color-mix(in srgb, var(--foreground, #ebebeb) 2.5%, transparent); transition: opacity .18s ease; }
+    [data-setting-card="compactTelemetryBar"][data-checked="false"] .pv-tbar-card { opacity: .38; }
+    .pv-tbar-body { padding: 6px 8px; }
+    .pv-tbar-track { display: flex; gap: 1.5px; height: 3.5px; border-radius: 99px; overflow: hidden; background: rgba(142,142,147,.22); }
+    .pv-tbar-track > i { display: block; height: 100%; border-radius: 99px; }
+    .pv-tbar-dock { display: grid; grid-template-columns: minmax(0, .84fr) minmax(0, .82fr) minmax(0, 1.44fr); background: color-mix(in srgb, var(--foreground, #ebebeb) 3%, transparent); border-top: 1px solid color-mix(in srgb, var(--border, rgba(142,142,147,.24)) 64%, transparent); }
+    .pv-tbar-cell { position: relative; display: flex; align-items: center; justify-content: center; gap: 4px; padding: 4px 3px; white-space: nowrap; }
+    .pv-tbar-cell + .pv-tbar-cell::before { content: ""; position: absolute; left: 0; top: 50%; transform: translateY(-50%); width: 1px; height: 10px; background: color-mix(in srgb, var(--border, rgba(142,142,147,.24)) 72%, transparent); }
+    .pv-tbar-cache { background: linear-gradient(90deg, color-mix(in srgb, #4ea84e 10%, transparent), transparent); }
+    .pv-tbar-cell b { font-weight: 500; color: color-mix(in srgb, var(--foreground, #ebebeb) 92%, transparent); }
+    .pv-tbar-u { font-style: normal; font-weight: 400; opacity: .6; }
     /* Speed breathing & cooldown */
     .pv-speed-cap { display: flex; align-items: center; }
     .pv-speed-cap .pv-pill { gap: 5px; }
@@ -1275,11 +1299,74 @@ const UI_HTML = `<!DOCTYPE html>
       body[data-highlight-context-hover="true"] .stats-context .seg { transition: width 0.25s ease, opacity .18s ease; }
       body[data-highlight-context-hover="true"] .stats-context .item-row { transition: opacity .18s ease; }
     }
+    /* Optional compact status bar: the cache and the last request as one row below the context
+       statistics. It takes the place of those two rows only; the rest stays as it is. */
+    .telemetry-dock { display: none; }
+    body[data-compact-telemetry-bar="true"] .panel .cache-bar,
+    body[data-compact-telemetry-bar="true"] .panel [data-generation-block] { display: none; }
+    body[data-compact-telemetry-bar="true"] .panel [data-generation-block] + [data-turn-metrics-block] { border-top: 1px solid var(--border, rgba(142, 142, 147, 0.24)); padding-top: var(--agy-section-gap); }
+    body[data-compact-telemetry-bar="true"] .telemetry-dock {
+      display: block;
+      margin-top: var(--agy-section-gap, 6px);
+      border: 1px solid color-mix(in srgb, var(--border, rgba(142, 142, 147, 0.24)) 64%, transparent);
+      border-radius: 7px;
+      overflow: hidden;
+      background: color-mix(in srgb, var(--foreground, #ebebeb) 3%, transparent);
+      line-height: 1.35;
+      font-variant-numeric: tabular-nums;
+    }
+    .telemetry-dock[data-mode="cache-only"] .tb-trio,
+    .telemetry-dock[data-mode="trio"] .tb-single { display: none; }
+    .telemetry-dock .tb-trio { display: grid; grid-template-columns: minmax(0, 0.84fr) minmax(0, 0.82fr) minmax(0, 1.44fr); }
+    .telemetry-dock .tb-cell { position: relative; display: flex; align-items: center; justify-content: center; gap: 4.5px; padding: 6px 4px; min-width: 0; white-space: nowrap; }
+    .telemetry-dock .tb-cell:hover { background-color: color-mix(in srgb, var(--foreground, #ebebeb) 4.5%, transparent); }
+    .telemetry-dock .tb-cell + .tb-cell::before { content: ""; position: absolute; left: 0; top: 50%; transform: translateY(-50%); width: 1px; height: 12px; border-radius: 1px; background: color-mix(in srgb, var(--border, rgba(142, 142, 147, 0.24)) 70%, transparent); }
+    .telemetry-dock .tb-single { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px; }
+    .telemetry-dock .tb-single-left { display: inline-flex; align-items: center; gap: 5px; min-width: 0; white-space: nowrap; }
+    .telemetry-dock .tb-single-right { display: inline-flex; align-items: baseline; gap: 7px; flex-shrink: 0; white-space: nowrap; }
+    .telemetry-dock .tb-icon { display: inline-flex; align-items: center; flex-shrink: 0; }
+    .telemetry-dock .tb-svg { opacity: .7; }
+    .telemetry-dock .tb-val { font-weight: 500; color: var(--foreground, #ebebeb); color: color-mix(in srgb, var(--foreground, #ebebeb) 88%, transparent); }
+    .telemetry-dock .tb-ttft .tb-val,
+    .telemetry-dock .tb-unit { font-weight: 400; color: var(--muted-foreground, #8e8e93); }
+    /* The cache state tints the cache's end of the bar and colors its value. */
+    .telemetry-dock[data-cache-status="fresh"] .tb-cache { background-image: linear-gradient(90deg, color-mix(in srgb, #4ea84e 9%, transparent), transparent); }
+    .telemetry-dock[data-cache-status="warning"] .tb-cache { background-image: linear-gradient(90deg, color-mix(in srgb, #d4940a 11%, transparent), transparent); }
+    .telemetry-dock[data-cache-status="cold"] .tb-cache { background-image: linear-gradient(90deg, color-mix(in srgb, #e06c75 10%, transparent), transparent); }
+    .telemetry-dock[data-cache-status="fresh"] .tb-single { background-image: linear-gradient(90deg, color-mix(in srgb, #4ea84e 8%, transparent), transparent 42%); }
+    .telemetry-dock[data-cache-status="warning"] .tb-single { background-image: linear-gradient(90deg, color-mix(in srgb, #d4940a 9%, transparent), transparent 42%); }
+    .telemetry-dock[data-cache-status="cold"] .tb-single { background-image: linear-gradient(90deg, color-mix(in srgb, #e06c75 9%, transparent), transparent 42%); }
+    .telemetry-dock[data-cache-status="warning"] .tb-cache .tb-val,
+    .telemetry-dock[data-cache-status="warning"] .tb-single .tb-val,
+    .telemetry-dock[data-cache-status="warning"] .tb-single-sub { color: #d4940a; }
+    .telemetry-dock[data-cache-status="cold"] .tb-cache .tb-val,
+    .telemetry-dock[data-cache-status="cold"] .tb-single .tb-val { opacity: .46; }
+    .telemetry-dock[data-cache-status="cold"] .tb-single-sub { color: #e06c75; }
+    .telemetry-dock[data-cache-status="idle"] .tb-cache .tb-val,
+    .telemetry-dock[data-cache-status="idle"] .tb-single .tb-val { font-weight: 400; color: var(--muted-foreground, #8e8e93); }
+    /* The bolt takes the speed's color, by the capsule's own thresholds. */
+    .telemetry-dock .tb-speed[data-speed-tier="green"] .tb-svg { color: light-dark(#16a34a, #4ea84e); opacity: .9; }
+    .telemetry-dock .tb-speed[data-speed-tier="yellow"] .tb-svg { color: light-dark(#d97706, #d4940a); opacity: .9; }
+    .telemetry-dock .tb-speed[data-speed-tier="red"] .tb-svg { color: light-dark(#dc2626, #e06c75); opacity: .9; }
+    /* Inside the context card the bar runs along the card's lower edge, as in the footer panel. */
+    @container stats (min-width: 420px) {
+      body[data-compact-telemetry-bar="true"] .stats-context { overflow: hidden; }
+      body[data-compact-telemetry-bar="true"] .telemetry-dock {
+        margin: var(--agy-section-gap, 6px) calc((var(--agy-pad-x, 10px) + 2px) * -1) calc((var(--agy-pad-y, 8px) + 2px) * -1);
+        border-width: 1px 0 0;
+        border-radius: 0;
+      }
+      .telemetry-dock .tb-single { padding: 6px calc(var(--agy-pad-x, 10px) + 2px); }
+    }
+    @media (prefers-reduced-motion: no-preference) {
+      .telemetry-dock .tb-cell { transition: background-color .14s ease; }
+    }
     body[data-label-case="lowercase"] .panel .cache-left,
     body[data-label-case="lowercase"] .panel .used-pct,
     body[data-label-case="lowercase"] .panel .item-label,
     body[data-label-case="lowercase"] .panel .turn-bar-label,
     body[data-label-case="lowercase"] .panel .turn-bar-short,
+    body[data-label-case="lowercase"] .panel .tb-single-label,
     body[data-label-case="lowercase"] .panel .usage-title,
     body[data-label-case="lowercase"] .panel .usage-seg button,
     body[data-label-case="lowercase"] .panel .usage-total > span,
@@ -1386,6 +1473,7 @@ const UI_HTML = `<!DOCTYPE html>
           ${presentation.generationMarkup()}
         </div>
         ${presentation.turnMetricsMarkup()}
+        ${presentation.telemetryBarMarkup('telemetry-dock')}
       </section>
       <div class="divider"></div>
       <div id="quota-root" class="stats-quota"></div>
@@ -1513,6 +1601,7 @@ const UI_HTML = `<!DOCTYPE html>
     </div>
     ${renderCheckCard({ id: 'setting-highlight-context-hover', key: 'highlightContextHover', checked: DEFAULT_SETTINGS.highlightContextHover })}
     ${renderCheckCard({ id: 'setting-show-request-metrics', helpId: 'request-metrics', key: 'showRequestMetrics', tip: 'requestSectionTip', checked: true })}
+    ${renderCheckCard({ id: 'setting-compact-telemetry-bar', key: 'compactTelemetryBar', checked: DEFAULT_SETTINGS.compactTelemetryBar })}
     <div class="setting-card setting-option-card metric-setting" data-setting-card="showTurnMetrics" data-layout-key="turnLayout" data-checked="${DEFAULT_SETTINGS.showTurnMetrics}" data-layout="columns">
       <div class="setting-head setting-pair-head">
         <div class="setting-pair-item"><label class="setting-check"><input id="setting-show-turn-metrics" name="showTurnMetrics" type="checkbox"${DEFAULT_SETTINGS.showTurnMetrics ? ' checked' : ''} aria-describedby="help-turn-metrics" /><span data-i18n="showTurnMetrics"></span></label></div>
@@ -1656,6 +1745,14 @@ const UI_HTML = `<!DOCTYPE html>
     });
     document.getElementById('row-cached').addEventListener('mouseenter', () => {
       if (lastData) document.getElementById('row-cached').title = presentation.cacheTooltip(lastData, labels, Date.now(), prefs);
+    });
+    // The compact status bar is computed only while it is shown. Like the Cache row it repaints
+    // when the pointer enters it, because its cache tooltip states an age.
+    function paintStatusBar(d) {
+      if (prefs.compactTelemetryBar === true) presentation.renderTelemetryBar(document.querySelector('.panel'), d, d.generation, labels, prefs);
+    }
+    document.querySelector('[data-telemetry-bar]').addEventListener('mouseenter', () => {
+      if (lastData) paintStatusBar(lastData);
     });
     for (const setting of document.querySelectorAll('.metric-setting')) {
       const resetHelp = () => {
@@ -1987,6 +2084,7 @@ const UI_HTML = `<!DOCTYPE html>
         presentation.renderAlerts(document.body, d, prefs, labels);
         presentation.renderGeneration(document.querySelector('.panel'), d.generation, labels, prefs);
         presentation.renderTurnMetrics(document.querySelector('.panel'), d.turnMetrics, labels, prefs);
+        paintStatusBar(d);
         const ctx = presentation.contextBreakdown(d);
 
         document.getElementById('used-pct').textContent = ctx.usedPct;
