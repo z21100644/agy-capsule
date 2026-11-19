@@ -450,6 +450,33 @@ test('column field order is adjustable, applied via CSS order, and edited inside
   assert.match(UI_HTML, /addEventListener\('drop'/);
 });
 
+test('the breakdown hover highlight is opt-in and pairs each bar segment with its breakdown item', () => {
+  assert.equal(DEFAULT_SETTINGS.highlightContextHover, false);
+  const ui = createPresentation();
+  assert.equal(ui.appearance({}).highlightContextHover, 'false');
+  assert.equal(ui.appearance({ highlightContextHover: true }).highlightContextHover, 'true');
+
+  const deck = readFileSync(new URL('../agy-capsule/sidecars/agy_capsule/deck_injector.mjs', import.meta.url), 'utf8');
+  const surfaces = [
+    { source: deck, seg: 'dk-seg', row: 'dk-item-row', gate: '#deck-metrics-strip[data-highlight-context-hover="true"]', scope: '.dk-ctx-pop' },
+    { source: UI_HTML, seg: 'seg', row: 'item-row', gate: 'body[data-highlight-context-hover="true"]', scope: '.stats-context' },
+  ];
+  for (const { source, seg, row, gate, scope } of surfaces) {
+    for (const cat of ['turn0', 'read', 'think', 'write']) {
+      // Both ends of a pair carry the same key, and pointing at either end dims whatever is outside it.
+      assert.match(source, new RegExp(`class="${seg}"[^>]* data-cat="${cat}"`));
+      assert.match(source, new RegExp(`class="${row}"[^>]* data-cat="${cat}"`));
+      assert.ok(source.includes(`${gate} ${scope}:has([data-cat="${cat}"]:hover) [data-cat]:not([data-cat="${cat}"])`), cat);
+    }
+    // Every rule of the effect sits behind the option, so nothing changes while it is off.
+    const css = source.slice(source.indexOf('<style>'), source.indexOf('</style>'));
+    const rules = css.split('\n').filter(line => line.includes('data-cat') || line.includes('highlight-context-hover'));
+    assert.ok(rules.length >= 8 && rules.every(line => line.trim().startsWith(gate)));
+  }
+  // The fade is declared only where motion is welcome, and keeps the segments' width transition.
+  assert.match(deck, /@media \(prefers-reduced-motion: no-preference\) \{\s*#deck-metrics-strip\[data-highlight-context-hover="true"\] \.dk-seg \{ transition: width 0\.25s ease, opacity \.18s ease; \}/);
+});
+
 test('failure panel shares matched height and quota-style placement; countdown sample follows display language', () => {
   const deck = readFileSync(new URL('../agy-capsule/sidecars/agy_capsule/deck_injector.mjs', import.meta.url), 'utf8');
   assert.ok(deck.includes("if (errorPop && !errorPop.closest('.dk-grp').hidden) pops.push(errorPop);"));

@@ -27,6 +27,7 @@ Shows context usage, cache hit rate and cache status. The limit is read live for
 - **Speed effects**: A dot that breathes while the model is generating. Red below 10 tok/s, yellow from 10 to under 25, green at 25 and above. After generation stops it keeps its color for 15 seconds, then grays out.
 
 - **Context breakdown**: Splits the context into turn0 (first turn), read, think and write, showing each value and share. Choose rows or columns. Rows can use square or dot markers; columns let you toggle name, value and percent and reorder them.
+- **Breakdown hover highlight (off by default)**: Pointing at a segment of the progress bar or at an item of the breakdown keeps that segment and its item lit and dims the rest. It works in the sidebar and in a pinned footer panel.
 - **Last request**: Shows the range from first token to the end of the latest request (e.g. `4.5s–8.6s`) and its generation speed.
 - **Turn metrics (off by default)**: Shows this turn's elapsed time, requests, thinking and write.
 

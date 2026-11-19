@@ -118,11 +118,11 @@ test('embedded runtime bundle and sidebar script use shared ui.mjs helpers witho
   ctx.globalThis = ctx;
   const bundle = buildRuntimeBundle(42);
   assert.equal(vm.runInContext(bundle.code, ctx), true);
-  assert.equal(ctx.__agyCapsulePresentation.version, 72);
+  assert.equal(ctx.__agyCapsulePresentation.version, 73);
   for (const key of ['contextBreakdown', 'cacheThresholds', 'makeCacheRingSvg', 'quotaColor', 'makeRingSvg', 'formatGroupTitle', 'formatBucketLabel', 'activeGroupColor', 'quotaView']) {
     assert.equal(typeof ctx.__agyCapsulePresentation[key], 'function', `missing ${key} in embedded presentation`);
   }
-  assert.ok(getPresentationScript().includes('version !== 72'));
+  assert.ok(getPresentationScript().includes('version !== 73'));
 
   const scriptMatch = UI_HTML.match(/<script>([\s\S]*?)<\/script>/);
   assert.ok(scriptMatch, 'UI_HTML should contain inline script');

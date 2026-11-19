@@ -39,6 +39,7 @@ Provides **Statistics** and **Settings** tabs at the top (settings live exclusiv
   - **Restart recovery notice**: `true` (when a previously-enabled footer capsule fails to attach after a launch that skipped the shortcut — e.g. Antigravity auto-update — shows a targeted sidebar notice with Windows shortcut detection / one-click restore, and sends at most one desktop notification per session)
   - **Generation speed** (`true`) + **Effects** (`false`; automatically forced off when speed is disabled)
   - **Context breakdown**: `true`; `columns` (default) or `rows`, `square` (default) or `dot` markers, with toggleable and drag-reorderable column fields (`Name`: `true`, `Value`: `true`, `%`: `false`; default order `label,value,percent`)
+  - **Breakdown hover highlight**: `false` (pointing at a segment of the progress bar or at a breakdown item keeps that segment and its item lit and dims the rest; CSS only; works in the sidebar and in a pinned footer panel)
   - **Last request**: `true` (shows `TTFT–total duration` range and generation speed)
   - **Turn metrics**: `false`; `columns` (default) or `rows`, `square` (default) or `dot` markers
   - **Server queue alert**: `true` with configurable threshold (`queueWarnSec`: `30s`, `1–999`) at the end of Settings

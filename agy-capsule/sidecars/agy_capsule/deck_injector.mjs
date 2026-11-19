@@ -86,11 +86,11 @@ function pageMount(d) {
   }
 
   // Upgrade or initialize DOM structure in-place
-  if (root.getAttribute('data-deck-ver') !== '114') {
+  if (root.getAttribute('data-deck-ver') !== '115') {
     release(root);
     root._pinnedGroup = null;
     root.removeAttribute('data-pinned');
-    root.setAttribute('data-deck-ver', '114');
+    root.setAttribute('data-deck-ver', '115');
     root._speedActivity = null;
     root._motionPrev = null;
     root._renderKey = null;
@@ -593,6 +593,20 @@ function pageMount(d) {
         #deck-metrics-strip .dk-item-label { order: var(--agy-order-label, 0); }
         #deck-metrics-strip .dk-item-k { order: var(--agy-order-value, 1); }
         #deck-metrics-strip .dk-item-pct { order: var(--agy-order-percent, 2); }
+        /* Optional hover link between the progress bar and the breakdown: pointing at either end of a
+           pair keeps that pair lit and dims the rest. CSS only, so nothing runs while it is off. */
+        #deck-metrics-strip[data-highlight-context-hover="true"] .dk-ctx-pop:has([data-cat="turn0"]:hover) [data-cat]:not([data-cat="turn0"]),
+        #deck-metrics-strip[data-highlight-context-hover="true"] .dk-ctx-pop:has([data-cat="read"]:hover) [data-cat]:not([data-cat="read"]),
+        #deck-metrics-strip[data-highlight-context-hover="true"] .dk-ctx-pop:has([data-cat="think"]:hover) [data-cat]:not([data-cat="think"]),
+        #deck-metrics-strip[data-highlight-context-hover="true"] .dk-ctx-pop:has([data-cat="write"]:hover) [data-cat]:not([data-cat="write"]) { opacity: .35; }
+        #deck-metrics-strip[data-highlight-context-hover="true"] .dk-ctx-pop:has([data-cat="turn0"]:hover) [data-cat="turn0"] .dk-item-label,
+        #deck-metrics-strip[data-highlight-context-hover="true"] .dk-ctx-pop:has([data-cat="read"]:hover) [data-cat="read"] .dk-item-label,
+        #deck-metrics-strip[data-highlight-context-hover="true"] .dk-ctx-pop:has([data-cat="think"]:hover) [data-cat="think"] .dk-item-label,
+        #deck-metrics-strip[data-highlight-context-hover="true"] .dk-ctx-pop:has([data-cat="write"]:hover) [data-cat="write"] .dk-item-label { color: var(--foreground, #18181b); }
+        @media (prefers-reduced-motion: no-preference) {
+          #deck-metrics-strip[data-highlight-context-hover="true"] .dk-seg { transition: width 0.25s ease, opacity .18s ease; }
+          #deck-metrics-strip[data-highlight-context-hover="true"] .dk-item-row { transition: opacity .18s ease; }
+        }
       </style>
 
       <!-- Context Capsule + Popover -->
@@ -614,25 +628,25 @@ function pageMount(d) {
             <div class="dk-used-frac" data-k="usedFrac" data-context-tip="overview">0 / --</div>
           </div>
           <div class="dk-track" data-context-tip="overview">
-            <div class="dk-seg" data-el="segTurn0" style="width: 0%; background: #d4940a"></div>
-            <div class="dk-seg" data-el="segRead" style="width: 0%; background: #388bfd"></div>
-            <div class="dk-seg" data-el="segThink" style="width: 0%; background: #00b386"></div>
-            <div class="dk-seg" data-el="segOut" style="width: 0%; background: #e86a24"></div>
+            <div class="dk-seg" data-el="segTurn0" data-cat="turn0" style="width: 0%; background: #d4940a"></div>
+            <div class="dk-seg" data-el="segRead" data-cat="read" style="width: 0%; background: #388bfd"></div>
+            <div class="dk-seg" data-el="segThink" data-cat="think" style="width: 0%; background: #00b386"></div>
+            <div class="dk-seg" data-el="segOut" data-cat="write" style="width: 0%; background: #e86a24"></div>
           </div>
           <div class="dk-list">
-            <div class="dk-item-row" data-context-tip="turn0">
+            <div class="dk-item-row" data-cat="turn0" data-context-tip="turn0">
               <span class="dk-dot" style="background:#d4940a"></span>
               <div class="dk-item-body"><span class="dk-item-label" data-i18n="turn0">Turn0</span><span class="dk-item-k" data-k="valTurn0K">0</span><span class="dk-item-pct" data-k="valTurn0Pct">0%</span></div>
             </div>
-            <div class="dk-item-row" data-context-tip="read">
+            <div class="dk-item-row" data-cat="read" data-context-tip="read">
               <span class="dk-dot" style="background:#388bfd"></span>
               <div class="dk-item-body"><span class="dk-item-label" data-i18n="read">Read</span><span class="dk-item-k" data-k="valReadK">0</span><span class="dk-item-pct" data-k="valReadPct">0%</span></div>
             </div>
-            <div class="dk-item-row" data-context-tip="think">
+            <div class="dk-item-row" data-cat="think" data-context-tip="think">
               <span class="dk-dot" style="background:#00b386"></span>
               <div class="dk-item-body"><span class="dk-item-label" data-i18n="think">Think</span><span class="dk-item-k" data-k="valThinkK">0</span><span class="dk-item-pct" data-k="valThinkPct">0%</span></div>
             </div>
-            <div class="dk-item-row" data-context-tip="write">
+            <div class="dk-item-row" data-cat="write" data-context-tip="write">
               <span class="dk-dot" style="background:#e86a24"></span>
               <div class="dk-item-body"><span class="dk-item-label" data-i18n="write">Write</span><span class="dk-item-k" data-k="valOutK">0</span><span class="dk-item-pct" data-k="valOutPct">0%</span></div>
             </div>

@@ -16,7 +16,7 @@ import { installAsyncHostRoutes, installEpipeGuard } from './host_bridge.mjs';
 import { createCdpNoticeManager } from './cdp_notice.mjs';
 
 const settingsStore = createSettingsStore();
-const PANEL_VERSION = 115;
+const PANEL_VERSION = 116;
 const presentation = createPresentation();
 export function getNotifyText(shortcutState, prefs) {
   const t = presentation.dictionaries[prefs?.settingsLanguage] || presentation.dictionaries['zh-CN'];
@@ -504,6 +504,10 @@ const PV_CARD_PREVIEW = {
     <span class="pv-pill pv-cw-1">${PV_SVG.db}<span class="pv-cw-val">40%</span></span>
     <span class="pv-pill pv-cw-2">${PV_SVG.db}<span class="pv-cw-val">75%</span></span>
     <span class="pv-pill pv-cw-3">${PV_SVG.db}<span class="pv-cw-val">90%</span></span>
+  </div>`,
+  highlightContextHover: `<div class="pv-hover-link">
+    <span class="pv-hl-track"><i class="pv-hl-rest" style="width:8%;background:#d4940a"></i><i style="width:28%;background:#388bfd"></i><i class="pv-hl-rest" style="width:5%;background:#00b386"></i><i class="pv-hl-rest" style="width:9%;background:#e86a24"></i></span>
+    <span class="pv-hl-names"><span class="pv-hl-rest" data-i18n="turn0"></span><span data-i18n="read"></span><span class="pv-hl-rest" data-i18n="think"></span><span class="pv-hl-rest" data-i18n="write"></span></span>
   </div>`,
   showRequestErrors: `<div class="pv-err-strip">
     <span class="pv-pill">${PV_SVG.db}<span>42%</span></span>
@@ -1001,6 +1005,14 @@ const UI_HTML = `<!DOCTYPE html>
     .pv-cw-val { color: var(--muted-foreground, #8e8e93); font-weight: 400; transition: color .18s ease; }
     [data-setting-card="showContextWarnings"][data-checked="true"] .pv-cw-2 .pv-cw-val { color: #d4940a; font-weight: 600; }
     [data-setting-card="showContextWarnings"][data-checked="true"] .pv-cw-3 .pv-cw-val { color: #e06c75; font-weight: 600; }
+    /* Breakdown hover highlight: checked shows one pair picked out, as while it is pointed at */
+    .pv-hover-link { display: grid; gap: 5px; }
+    .pv-hl-track { display: flex; gap: 1.5px; height: 4px; border-radius: 99px; overflow: hidden; background: rgba(142,142,147,.24); }
+    .pv-hl-track > i { border-radius: 99px; }
+    .pv-hl-names { display: flex; gap: 10px; }
+    .pv-hl-track > i, .pv-hl-names > span { transition: opacity .18s ease, color .18s ease; }
+    [data-setting-card="highlightContextHover"][data-checked="true"] .pv-hl-rest { opacity: .35; }
+    [data-setting-card="highlightContextHover"][data-checked="true"] .pv-hl-names > :not(.pv-hl-rest) { color: var(--foreground, #ebebeb); }
     /* Request failure capsule: unchecked hides 3rd error pill, checked shows it */
     .pv-err-strip, .pv-queue-strip { display: flex; align-items: center; gap: 6px; }
     .pv-err-strip .pv-pill, .pv-queue-strip .pv-pill { flex: 0 0 auto; }
@@ -1116,6 +1128,20 @@ const UI_HTML = `<!DOCTYPE html>
     .item-label { order: var(--agy-order-label, 0); }
     .item-k { order: var(--agy-order-value, 1); }
     .item-pct { order: var(--agy-order-percent, 2); }
+    /* Optional hover link between the progress bar and the breakdown: pointing at either end of a
+       pair keeps that pair lit and dims the rest. CSS only, so nothing runs while it is off. */
+    body[data-highlight-context-hover="true"] .stats-context:has([data-cat="turn0"]:hover) [data-cat]:not([data-cat="turn0"]),
+    body[data-highlight-context-hover="true"] .stats-context:has([data-cat="read"]:hover) [data-cat]:not([data-cat="read"]),
+    body[data-highlight-context-hover="true"] .stats-context:has([data-cat="think"]:hover) [data-cat]:not([data-cat="think"]),
+    body[data-highlight-context-hover="true"] .stats-context:has([data-cat="write"]:hover) [data-cat]:not([data-cat="write"]) { opacity: .35; }
+    body[data-highlight-context-hover="true"] .stats-context:has([data-cat="turn0"]:hover) [data-cat="turn0"] .item-label,
+    body[data-highlight-context-hover="true"] .stats-context:has([data-cat="read"]:hover) [data-cat="read"] .item-label,
+    body[data-highlight-context-hover="true"] .stats-context:has([data-cat="think"]:hover) [data-cat="think"] .item-label,
+    body[data-highlight-context-hover="true"] .stats-context:has([data-cat="write"]:hover) [data-cat="write"] .item-label { color: var(--foreground, #ebebeb); }
+    @media (prefers-reduced-motion: no-preference) {
+      body[data-highlight-context-hover="true"] .stats-context .seg { transition: width 0.25s ease, opacity .18s ease; }
+      body[data-highlight-context-hover="true"] .stats-context .item-row { transition: opacity .18s ease; }
+    }
     body[data-label-case="lowercase"] .panel .cache-left,
     body[data-label-case="lowercase"] .panel .used-pct,
     body[data-label-case="lowercase"] .panel .item-label,
@@ -1185,29 +1211,29 @@ const UI_HTML = `<!DOCTYPE html>
         </div>
 
         <div class="progress-track" id="progress-track" data-context-tip="overview">
-          <div class="seg" id="seg-turn0" style="width: 0%; background: #d4940a"></div>
-          <div class="seg" id="seg-read" style="width: 0%; background: #388bfd"></div>
-          <div class="seg" id="seg-think" style="width: 0%; background: #00b386"></div>
-          <div class="seg" id="seg-out" style="width: 0%; background: #e86a24"></div>
+          <div class="seg" id="seg-turn0" data-cat="turn0" style="width: 0%; background: #d4940a"></div>
+          <div class="seg" id="seg-read" data-cat="read" style="width: 0%; background: #388bfd"></div>
+          <div class="seg" id="seg-think" data-cat="think" style="width: 0%; background: #00b386"></div>
+          <div class="seg" id="seg-out" data-cat="write" style="width: 0%; background: #e86a24"></div>
         </div>
 
         <div class="list">
-          <div class="item-row" id="row-turn0" data-context-tip="turn0">
+          <div class="item-row" id="row-turn0" data-cat="turn0" data-context-tip="turn0">
             <span class="dot" style="background:#d4940a"></span>
             <div class="item-body"><span class="item-label" data-i18n="turn0">Turn0</span><span class="item-k" id="val-turn0-k">0</span><span class="item-pct" id="val-turn0-pct">0%</span></div>
           </div>
 
-          <div class="item-row" id="row-read" data-context-tip="read">
+          <div class="item-row" id="row-read" data-cat="read" data-context-tip="read">
             <span class="dot" style="background:#388bfd"></span>
             <div class="item-body"><span class="item-label" data-i18n="read">Read</span><span class="item-k" id="val-read-k">0</span><span class="item-pct" id="val-read-pct">0%</span></div>
           </div>
 
-          <div class="item-row" id="row-think" data-context-tip="think">
+          <div class="item-row" id="row-think" data-cat="think" data-context-tip="think">
             <span class="dot" style="background:#00b386"></span>
             <div class="item-body"><span class="item-label" data-i18n="think">Think</span><span class="item-k" id="val-think-k">0</span><span class="item-pct" id="val-think-pct">0%</span></div>
           </div>
 
-          <div class="item-row" id="row-out" data-context-tip="write">
+          <div class="item-row" id="row-out" data-cat="write" data-context-tip="write">
             <span class="dot" style="background:#e86a24"></span>
             <div class="item-body"><span class="item-label" data-i18n="write">Write</span><span class="item-k" id="val-out-k">0</span><span class="item-pct" id="val-out-pct">0%</span></div>
           </div>
@@ -1338,6 +1364,7 @@ const UI_HTML = `<!DOCTYPE html>
         ${PV_CONTEXT_ITEMS.map(([key, color, value, pct]) => `<div class="item-row"><span class="dot" style="background:${color}"></span><div class="item-body"><span class="item-label" data-i18n="${key}"></span><span class="item-k">${value}</span><span class="item-pct">${pct}</span></div></div>`).join('')}
       </div></div>
     </div>
+    ${renderCheckCard({ id: 'setting-highlight-context-hover', key: 'highlightContextHover', checked: DEFAULT_SETTINGS.highlightContextHover })}
     ${renderCheckCard({ id: 'setting-show-request-metrics', helpId: 'request-metrics', key: 'showRequestMetrics', tip: 'requestSectionTip', checked: true })}
     <div class="setting-card setting-option-card metric-setting" data-setting-card="showTurnMetrics" data-layout-key="turnLayout" data-checked="${DEFAULT_SETTINGS.showTurnMetrics}" data-layout="columns">
       <div class="setting-head setting-pair-head">
