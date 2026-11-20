@@ -106,6 +106,22 @@ test('shared quota helpers match colors, SVG ring sizes, labels, sorting, and we
   assert.deepEqual(ui.quotaView(null), []);
 });
 
+test('reinjecting the footer replaces the v1.2.3 presentation in the same page', () => {
+  const ctx = vm.createContext({});
+  // The previously injected presentation survives until the page is reloaded or the cache is replaced.
+  vm.runInContext(`globalThis.__agyCapsulePresentation = {
+    version: 68, dictionaries: { 'zh-CN': { queueShort: '排队', queueHeading: '服务器排队' } }
+  };`, ctx);
+
+  vm.runInContext(getPresentationScript(), ctx);
+  const updated = ctx.__agyCapsulePresentation;
+  assert.equal(updated.dictionaries['zh-CN'].queueShort, '等待');
+  assert.equal(updated.dictionaries['zh-CN'].queueHeading, '首字等待');
+
+  vm.runInContext(getPresentationScript(), ctx);
+  assert.strictEqual(ctx.__agyCapsulePresentation, updated, 'reinjecting the same version reuses the cache');
+});
+
 test('embedded runtime bundle and sidebar script use shared ui.mjs helpers without syntax errors', () => {
   const ctx = vm.createContext({
     window: {},
@@ -118,11 +134,12 @@ test('embedded runtime bundle and sidebar script use shared ui.mjs helpers witho
   ctx.globalThis = ctx;
   const bundle = buildRuntimeBundle(42);
   assert.equal(vm.runInContext(bundle.code, ctx), true);
-  assert.equal(ctx.__agyCapsulePresentation.version, 75);
+  const version = createPresentation().version;
+  assert.equal(ctx.__agyCapsulePresentation.version, version);
   for (const key of ['contextBreakdown', 'cacheThresholds', 'makeCacheRingSvg', 'makeTelemetryCacheRingSvg', 'telemetryBarView', 'telemetryBarMarkup', 'renderTelemetryBar', 'quotaColor', 'makeRingSvg', 'formatGroupTitle', 'formatBucketLabel', 'activeGroupColor', 'quotaView']) {
     assert.equal(typeof ctx.__agyCapsulePresentation[key], 'function', `missing ${key} in embedded presentation`);
   }
-  assert.ok(getPresentationScript().includes('version !== 75'));
+  assert.ok(getPresentationScript().includes(`version !== ${version}`));
 
   const scriptMatch = UI_HTML.match(/<script>([\s\S]*?)<\/script>/);
   assert.ok(scriptMatch, 'UI_HTML should contain inline script');

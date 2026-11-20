@@ -57,12 +57,12 @@ test('the footer strip is repainted only when what it shows or where it sits cha
   dom.tick();
   assert.equal(strip.querySelector('[data-el="ctxIconSvg"]').style.color, 'rgba(206, 168, 92, 0.88)');
 
-  // So does a live server-queue wait, which counts up every second.
+  // So does a live first-token wait, which counts up every second.
   apply({ ...data, turnQueue: { userStepIndex: 10, waits: [], waitingSinceMs: dom.now - 31000, hasPendingPlanner: true, turnTerminal: false } });
   const alertPill = strip.querySelector('[data-el="grpError"]').querySelector('.dk-pill');
-  assert.equal(alertPill.getAttribute('aria-label'), 'Server queue: Queue 31s');
+  assert.equal(alertPill.getAttribute('aria-label'), 'First-token wait: Wait 31s');
   assert.ok(second() > 0);
-  assert.equal(alertPill.getAttribute('aria-label'), 'Server queue: Queue 32s');
+  assert.equal(alertPill.getAttribute('aria-label'), 'First-token wait: Wait 32s');
 
   // The expiry bar advances every second too, but only its fill is touched.
   apply({ ...data, prefs: { ...data.prefs, cacheIndicator: 'bar' } });
@@ -132,11 +132,62 @@ test('statistics behind the settings tab are not refreshed and catch up when it 
   vm.runInContext("selectSidebarView('settings')", context);
   data.contextTokens = 64000;
   data.deckCdp = 'missing';
+  data.availableModels = ['Gemini 4 Argon', 'Claude'];
   await poll();
   await poll();
   assert.equal(used.textContent, '50%');
   assert.equal(dom.document.getElementById('cdp-notice').hidden, false, 'the notice shown on both tabs stays live');
+  assert.deepEqual(
+    dom.document.getElementById('setting-model-list').children.map(node => node.textContent),
+    ['Gemini 4 Argon', 'Claude'],
+    'the model list on the settings tab still populates as models arrive'
+  );
 
   vm.runInContext("selectSidebarView('stats')", context);
   assert.equal(used.textContent, '25%');
+});
+
+test('the enhanced model capsule reacts to late trigger hydration and host model changes without idle repaints', () => {
+  const owner = 1234;
+  const dom = createStubDom();
+  const footer = dom.element(), footerLeft = dom.element(), controls = dom.element();
+  const trigger = dom.element('button');
+  trigger.setAttribute('data-testid', 'model-selector-trigger');
+  footerLeft.appendChild(trigger);
+  footer.appendChild(footerLeft);
+  footer.appendChild(controls);
+  dom.footers = [footerLeft];
+  const context = windowOf(dom);
+  assert.equal(vm.runInContext(buildRuntimeBundle(owner).code, context), true);
+  const data = { ...snapshot(dom.now), prefs: { ...DEFAULT_SETTINGS, modelEffortPicker: true } };
+  const apply = next => context.__agyCapsuleDeck.apply(next, '/', owner);
+  const second = () => { const before = dom.writes; dom.now += 1000; dom.tick(); return dom.writes - before; };
+
+  assert.equal(apply(data), true);
+  const strip = dom.document.getElementById('agy-capsule-host').shadowRoot.getElementById('deck-metrics-strip');
+  assert.equal(strip._modelPicker, undefined, 'no picker before the host fiber is ready');
+  assert.equal(second(), 0);
+
+  // React hydrates the trigger without any new snapshot from the sidecar.
+  const opts = [{ label: 'Argon (Low)' }, { label: 'Argon (High)' }];
+  const selector = { modelOptions: opts, selectedModel: opts[0], setSelectedModel(opt) { this.selectedModel = opt; } };
+  trigger.__reactFiber$test = {
+    memoizedProps: { value: selector },
+    return: { memoizedProps: { conversationId: 'conv-1', placement: 'top-start' } },
+  };
+  assert.ok(second() > 0, 'hydrating the host trigger mounts the picker on the next tick');
+  assert.equal(strip._modelPicker?.id, 'conv-1');
+  assert.equal(strip.children[0].dataset.label, 'Argon (Low)');
+  assert.equal(second() + second(), 0, 'idle seconds still write nothing once mounted');
+
+  // Host model changes without a new sidecar snapshot still update the picker.
+  selector.selectedModel = opts[1];
+  assert.ok(second() > 0);
+  assert.equal(strip.children[0].dataset.label, 'Argon (High)');
+  assert.equal(second(), 0);
+
+  // Turning the setting off disposes the picker and releases the native trigger.
+  apply({ ...data, prefs: { ...DEFAULT_SETTINGS, modelEffortPicker: false } });
+  assert.equal(strip._modelPicker, undefined);
+  assert.equal(trigger.getAttribute('data-deck-model-bubble'), null);
 });

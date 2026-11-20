@@ -317,3 +317,98 @@ await test('A newer injector takes over the same bundle and rejects an in-flight
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+await test('Model picker submits one host option and releases the native trigger', async t => {
+  const browser = await chromium.launch(launch);
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.setContent('<textarea>draft</textarea><div class="agy-composer-footer" style="position:fixed;bottom:12px;width:90vw;display:flex"><div style="flex:1;display:flex"><button data-testid="model-selector-trigger">Native menu</button></div><div>Send</div></div>');
+  const trigger = page.getByTestId('model-selector-trigger');
+  await trigger.evaluate(button => {
+    const options = ['Claude (Low)', 'Argon (Low)', 'Argon (High)', 'Fixed'].map(label => ({ label }));
+    options.push({ label: 'Disabled', disabled: true });
+    let selected = options[0];
+    window.calls = [];
+    button.__reactFiber$fixture = { memoizedProps: { conversationId: 'fixture', placement: 'top' }, return: {
+      memoizedProps: { value: {
+        visibleModelConfigs: options, getModelConfigForConversation: () => selected,
+        setModelConfigByLabelForConversation(label, conversation, persist) {
+          window.calls.push([label, conversation, persist]);
+          selected = options.find(option => option.label === label);
+        },
+      } },
+    } };
+  });
+  await page.evaluate(buildRuntimeBundle(owner).code);
+  const data = snapshot();
+  await apply(page, data);
+  const picker = page.locator('[data-el="modelPicker"]');
+  assert.equal(await picker.count(), 0);
+  data.prefs.modelEffortPicker = true;
+  await apply(page, data);
+  assert.equal(await trigger.evaluate(el => el.getBoundingClientRect().width), 22);
+  await picker.click();
+  assert.equal(await page.getByRole('menuitem', { name: 'Disabled', exact: true }).count(), 0);
+  await page.getByRole('menuitem', { name: 'Argon (Low)', exact: true }).hover();
+  await page.getByRole('menuitem', { name: 'Argon (High)', exact: true }).click();
+  assert.deepEqual(await page.evaluate(() => window.calls), [['Argon (High)', 'fixture', false]]);
+  assert.equal(await picker.textContent(), 'Argon High');
+  assert.equal(await page.locator('textarea').inputValue(), 'draft');
+  await picker.click();
+  await trigger.evaluate(button => { button.__reactFiber$fixture.memoizedProps.conversationId = 'other'; });
+  await page.getByRole('menuitem', { name: 'Fixed', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.calls.length), 1);
+  data.prefs.modelEffortPicker = false;
+  await apply(page, data);
+  assert.equal(await picker.count(), 0);
+  assert.equal(await trigger.getAttribute('data-deck-model-bubble'), null);
+});
+
+await test('2.33 model picker shows the inherited effort, can hide previews, and restores the native button', async t => {
+  const browser = await chromium.launch(launch);
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.setContent('<div class="agy-composer-footer" style="position:fixed;bottom:12px;width:90vw;display:flex"><div style="flex:1;display:flex"><button data-testid="model-selector-trigger">Native menu</button></div><div>Send</div></div>');
+  const trigger = page.getByTestId('model-selector-trigger');
+  await trigger.evaluate(button => {
+    const modelOptions = ['Claude (Low)', 'Argon (Low)', 'Argon (Medium)', 'Argon (High)', 'Fixed (High)']
+      .map((label, value) => ({ label, value }));
+    window.calls = [];
+    const selector = {
+      modelOptions,
+      selectedModel: modelOptions[0],
+      setSelectedModel(option) {
+        window.calls.push({ label: option.label, exact: modelOptions.includes(option) });
+        this.selectedModel = option;
+      },
+    };
+    button.__reactFiber$fixture = { memoizedProps: { value: selector }, return: {
+      memoizedProps: { conversationId: 'fixture', placement: 'top-start' },
+    } };
+  });
+  await page.evaluate(buildRuntimeBundle(owner).code);
+  const data = snapshot();
+  Object.assign(data.prefs, { modelEffortPicker: true, keepNativeModelEntry: false });
+  await apply(page, data);
+  const picker = page.locator('[data-el="modelPicker"]');
+  assert.equal(await trigger.getAttribute('data-deck-model-bubble'), 'hidden');
+  await picker.click();
+  const argon = page.locator('button.dk-model-row[data-family="Argon"]');
+  assert.equal(await argon.locator('.dk-mp-effort').textContent(), 'Low');
+  await argon.click();
+  assert.deepEqual(await page.evaluate(() => window.calls), [{ label: 'Argon (Low)', exact: true }]);
+
+  data.prefs.hideDefaultEffort = true;
+  await apply(page, data);
+  assert.equal(await picker.textContent(), 'Argon Low');
+  await picker.click();
+  assert.equal(await argon.locator('.dk-mp-effort').count(), 0);
+  assert.equal(await page.getByRole('menuitem', { name: 'Fixed (High)', exact: true }).textContent(), 'Fixed');
+  await argon.hover();
+  assert.equal(await page.getByRole('menuitem', { name: 'Argon (High)', exact: true }).isVisible(), true);
+
+  data.prefs.modelEffortPicker = false;
+  await apply(page, data);
+  assert.equal(await picker.count(), 0);
+  assert.equal(await trigger.getAttribute('data-deck-model-bubble'), null);
+});

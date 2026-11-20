@@ -240,10 +240,10 @@ test('sidebar settings use flat dividers, same-row appearance blocks, refined ca
   );
   assert.ok(!UI_HTML.includes('data-settings-scope="quota"') && !UI_HTML.includes('data-settings-scope="context"'));
   assert.ok(!UI_HTML.includes('data-settings-scope="request"') && !UI_HTML.includes('data-settings-scope="turn"'));
-  assert.ok(UI_HTML.includes('id="help-language-scope"') && UI_HTML.includes('id="help-speed-pair"') && UI_HTML.includes('id="help-request-metrics"') && UI_HTML.includes('id="help-turn-metrics"'));
+  assert.ok(UI_HTML.includes('id="help-language-scope"') && UI_HTML.includes('id="help-notify-cdp-restart"') && UI_HTML.includes('id="help-speed-pair"') && UI_HTML.includes('id="help-request-metrics"') && UI_HTML.includes('id="help-turn-metrics"'));
   assert.ok(!UI_HTML.includes('class="settings-note"'));
   assert.match(settingsHtml, /data-setting-card="language"[\s\S]*?class="setting-help-dot"[\s\S]*?id="help-language-scope"[^>]*data-i18n="languageScopeNote"/);
-  assert.equal((settingsHtml.match(/class="setting-help-dot"/g) || []).length, 4, 'only 4 concise ? help dots should remain');
+  assert.equal((settingsHtml.match(/class="setting-help-dot"/g) || []).length, 5, 'only 5 concise ? help dots should remain');
   assert.ok(UI_HTML.includes('data-preview-group="turn"') && !UI_HTML.includes('data-preview-group="request"'));
   assert.equal(ui.dictionaries.en.showRequestMetrics, 'Last request');
   assert.equal(ui.dictionaries.en.turnMetrics, 'Last turn');
@@ -534,7 +534,7 @@ test('the frosted skin is opt-in, changes only the panel material and never asks
 
 test('help dots, disabled option controls, turn preview short labels, and convId validation stay consistent', async () => {
   const settingsHtml = UI_HTML.slice(UI_HTML.indexOf('<section class="settings'));
-  assert.equal((settingsHtml.match(/<span class="setting-help-dot" aria-hidden="true">\?<\/span>/g) || []).length, 4);
+  assert.equal((settingsHtml.match(/<span class="setting-help-dot" aria-hidden="true">\?<\/span>/g) || []).length, 5);
   assert.doesNotMatch(settingsHtml, /<button[^>]*setting-help-dot/);
   assert.doesNotMatch(UI_HTML, /\.setting-help-dot\s*\{[^}]*margin-left:\s*auto/);
   assert.match(UI_HTML, /\.metric-setting > \.setting-head \{ justify-content: flex-start; \}/);

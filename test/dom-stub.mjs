@@ -37,10 +37,23 @@ export function createStubDom({ page = false } = {}) {
           return force;
         },
       },
+      hasAttribute: name => attributes.has(name),
       getAttribute: name => attributes.get(name) ?? null,
       setAttribute(name, value) { dom.writes++; attributes.set(name, String(value)); },
       removeAttribute(name) { dom.writes++; attributes.delete(name); },
-      querySelector: selector => (inTree || el.innerHTML) && !selector.includes(':hover') ? standIn(selector) : null,
+      matches: () => false,
+      querySelector(selector) {
+        const testId = /\[data-testid="([^"]+)"\]/.exec(selector)?.[1];
+        if (testId) {
+          const stack = [...target.children];
+          while (stack.length) {
+            const child = stack.shift();
+            if (child.getAttribute('data-testid') === testId) return child;
+            stack.push(...child.children);
+          }
+        }
+        return (inTree || el.innerHTML) && !selector.includes(':hover') ? standIn(selector) : null;
+      },
       querySelectorAll: () => [],
       closest: selector => (inTree ? standIn('closest ' + selector) : null),
       contains(node) { for (let n = node; n; n = n.parentElement) if (n === el) return true; return false; },
@@ -52,6 +65,28 @@ export function createStubDom({ page = false } = {}) {
         if (child.id) attached.set(child.id, child);
         return child;
       },
+      prepend(...nodes) {
+        for (const node of [...nodes].reverse()) {
+          if (!node || typeof node !== 'object') { dom.writes++; continue; }
+          node.remove();
+          dom.writes++;
+          target.children.unshift(node);
+          node._setParent(el);
+          if (node.id) attached.set(node.id, node);
+        }
+      },
+      append(...nodes) {
+        for (const node of nodes) {
+          if (node && typeof node === 'object') this.appendChild(node);
+          else dom.writes++;
+        }
+      },
+      replaceChildren(...nodes) {
+        for (const child of [...target.children]) child.remove();
+        dom.writes++;
+        this.append(...nodes);
+      },
+      insertAdjacentHTML() { dom.writes++; },
       remove() {
         if (!parent) return;
         dom.writes++;
@@ -76,6 +111,7 @@ export function createStubDom({ page = false } = {}) {
       _setRoot(node) { rootNode = node; },
     };
     Object.defineProperty(target, 'parentElement', { get: () => parent });
+    Object.defineProperty(target, 'isConnected', { get: () => Boolean(parent || rootNode || inTree) });
     const el = counted(target);
     return el;
   }
@@ -102,6 +138,7 @@ export function createStubDom({ page = false } = {}) {
     SVGElement: class {},
     Date: class extends Date { static now() { return dom.now; } },
     setInterval(callback) { dom.tick = callback; return 1; }, clearInterval() {},
+    setTimeout() { return 1; }, clearTimeout() {},
     console, URLSearchParams, AbortSignal,
   };
   return dom;

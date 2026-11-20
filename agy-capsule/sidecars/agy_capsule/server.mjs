@@ -18,7 +18,7 @@ import { createUsageHistory } from './usage_history.mjs';
 import { createUsagePresentation } from './usage_ui.mjs';
 
 const settingsStore = createSettingsStore();
-const PANEL_VERSION = 120;
+const PANEL_VERSION = 122;
 const presentation = createPresentation();
 export function getNotifyText(shortcutState, prefs) {
   const t = presentation.dictionaries[prefs?.settingsLanguage] || presentation.dictionaries['zh-CN'];
@@ -356,11 +356,21 @@ function readConversationSnapshot(dbPath, includeTurnMetrics = true) {
         const transitions = (parsePbMap(fields.get(26)?.[0] || Buffer.alloc(0)).get(1) || []).map(value => parsePbMap(value));
         const generating = transitions.filter(item => item.get(1)?.[0] === 8).map(item => epoch(item.get(2)?.[0])).filter(value => value !== null);
         const terminal = transitions.filter(item => [3, 6, 7, 12].includes(item.get(1)?.[0])).map(item => epoch(item.get(2)?.[0])).filter(value => value !== null);
+        let inputStartedAtMs = null;
+        if (step.step_type === 14) {
+          for (const item of transitions) {
+            const status = item.get(1)?.[0];
+            // Step creation may precede consumption by the entire time spent queued.
+            if (status === 11) inputStartedAtMs = null;
+            else if (status === 2 || status === 3) inputStartedAtMs ??= epoch(item.get(2)?.[0]);
+          }
+        }
         return {
           idx: step.idx, step_type: step.step_type, status: step.status,
           completedAtMs: (time.get(1)?.[0] || 0) * 1000 + (time.get(2)?.[0] || 0) / 1e6,
           recordedCompletedAtMs: epoch(fields.get(8)?.[0]),
           createdAtMs: epoch(fields.get(1)?.[0]),
+          inputStartedAtMs,
           generatingAtMs: generating.length ? Math.min(...generating) : null,
           terminalAtMs: terminal.length ? Math.max(...terminal) : null,
           executionId: fields.get(12)?.[0]?.toString('utf8') || '',
@@ -403,7 +413,9 @@ function readConversationSnapshot(dbPath, includeTurnMetrics = true) {
     if (!parsed) continue;
     parsedRequests.push(parsed);
     latestGeneration = parsed.generation;
-    latestRequestError = parsed.requestError;
+    // Known earlier requests may finish late; they cannot replace the current turn's error.
+    const earlierRequest = userStepIndex !== null && parsed.lastStepIndex >= 0 && parsed.lastStepIndex < userStepIndex;
+    if (!earlierRequest) latestRequestError = parsed.requestError;
     if (parsed.maxContextTokens > 0) {
       maxContextTokens = parsed.maxContextTokens;
     }
@@ -588,7 +600,6 @@ const PV_CARD_PREVIEW = {
     <span class="pv-pill">${PV_SVG.clock}<span>85%</span></span>
     <span class="pv-pill pv-pill-err">${PV_SVG.warn}<span>429</span></span>
   </div>`,
-  notifyCdpRestart: `<div class="pv-restart-note"><span data-i18n="cdpRestartPreview"></span></div>`,
   showQueueWarnings: `<div class="pv-queue-strip">
     <span class="pv-pill">${PV_SVG.db}<span>42%</span></span>
     <span class="pv-pill">${PV_SVG.clock}<span>85%</span></span>
@@ -1412,14 +1423,27 @@ const UI_HTML = `<!DOCTYPE html>
     .cdp-notice summary { cursor: pointer; color: var(--foreground, #ebebeb); }
     .cdp-notice ol { margin: 5px 0 0; padding-left: 18px; display: grid; gap: 4px; }
     .cdp-notice code { user-select: text; font-family: ui-monospace, Consolas, monospace; font-size: 11px; padding: 0 3px; border-radius: 3px; background: color-mix(in srgb, var(--foreground, #ebebeb) 8%, transparent); color: var(--foreground, #ebebeb); word-break: break-all; }
-    .pv-restart-note { font-size: 11.5px; color: var(--muted-foreground, #8e8e93); transition: opacity .18s ease; }
-    [data-setting-card="notifyCdpRestart"][data-checked="false"] .pv-restart-note { opacity: .4; }
     .pv-usage-heat { display: flex; gap: 2px; transition: opacity .18s ease; }
     .pv-usage-bars { display: flex; align-items: flex-end; gap: 3px; height: 18px; transition: opacity .18s ease; }
     .pv-usage-bars > span { display: flex; flex-direction: column; width: 6px; border-radius: 1.5px 1.5px 0 0; overflow: hidden; }
     .pv-usage-bars i { display: block; }
     [data-setting-card="showUsageActivity"][data-checked="false"] .pv-usage-heat,
     [data-setting-card="showModelUsage"][data-checked="false"] .pv-usage-bars { opacity: .4; }
+    .setting-model-grid { display: grid; grid-template-columns: auto auto; justify-content: start; align-items: center; column-gap: 14px; row-gap: 6px; }
+    .setting-model-grid .setting-pair-item > label { font-size: 13px; color: var(--foreground, #ebebeb); min-width: 0; }
+    .setting-model-grid .setting-preview { padding: 0; }
+    .pv-mp { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 11.5px; transition: opacity .18s ease; }
+    .pv-mp-bubble { width: 20px; height: 20px; border-radius: 999px; display: inline-grid; place-items: center; background: var(--secondary, rgba(142,142,147,.16)); color: var(--muted-foreground, #8e8e93); font-size: 12px; transition: opacity .18s ease, width .18s ease, margin .18s ease; overflow: hidden; }
+    .pv-mp-pill { gap: 4px; padding: 2px 7px; }
+    .pv-mp-name { color: var(--foreground, #ebebeb); }
+    .pv-mp-effort { color: var(--muted-foreground, #8e8e93); }
+    [data-setting-card="modelEffortPicker"][data-checked="false"] .pv-mp { opacity: .4; }
+    [data-setting-card="modelEffortPicker"][data-keep-native="false"] .pv-mp-bubble { width: 0; opacity: 0; margin-right: -6px; }
+    .pv-model-list { display: flex; flex-direction: column; gap: 5px; padding-top: 4px; }
+    [data-setting-card="modelEffortPicker"]:not([data-customize-models="true"]) .pv-model-list { display: none; }
+    .pv-model-list:empty { display: none; }
+    .pv-model-item { width: 100%; justify-content: flex-start; padding: 5px 10px; font-size: 12px; text-align: left; }
+    .pv-model-empty { font-size: 11.5px; color: var(--muted-foreground, #8e8e93); padding: 2px 2px 0; }
     @media(pointer:coarse) { .pv-swatch { min-height: 40px; } }
   </style>
 </head>
@@ -1559,6 +1583,47 @@ const UI_HTML = `<!DOCTYPE html>
     ${renderCheckCard({ id: 'setting-pop-animation', key: 'popAnimation', checked: DEFAULT_SETTINGS.popAnimation })}
 
     <div class="settings-scope" data-settings-scope="features" data-i18n="featuresSection"></div>
+    <div class="setting-card setting-model-card" data-setting-card="modelEffortPicker" data-checked="${DEFAULT_SETTINGS.modelEffortPicker}" data-keep-native="${DEFAULT_SETTINGS.keepNativeModelEntry}" data-customize-models="false">
+      <div class="setting-model-grid">
+        <div class="setting-pair-item">
+          <label class="setting-check">
+            <input id="setting-model-effort-picker" name="modelEffortPicker" type="checkbox"${DEFAULT_SETTINGS.modelEffortPicker ? ' checked' : ''} />
+            <span data-i18n="modelEffortPicker"></span>
+          </label>
+        </div>
+        <div class="setting-pair-item" data-setting-card="keepNativeModelEntry" data-checked="${DEFAULT_SETTINGS.keepNativeModelEntry}" data-parent-off="${!DEFAULT_SETTINGS.modelEffortPicker}">
+          <label class="setting-check">
+            <input id="setting-keep-native-model-entry" name="keepNativeModelEntry" type="checkbox"${DEFAULT_SETTINGS.keepNativeModelEntry ? ' checked' : ''} />
+            <span data-i18n="keepNativeModelEntry"></span>
+          </label>
+        </div>
+        <div class="setting-pair-item" data-setting-card="hideModelTags" data-checked="${DEFAULT_SETTINGS.hideModelTags}" data-parent-off="${!DEFAULT_SETTINGS.modelEffortPicker}">
+          <label class="setting-check">
+            <input id="setting-hide-model-tags" name="hideModelTags" type="checkbox"${DEFAULT_SETTINGS.hideModelTags ? ' checked' : ''} />
+            <span data-i18n="hideModelTags"></span>
+          </label>
+        </div>
+        <div class="setting-pair-item" data-setting-card="hideDefaultEffort" data-checked="${DEFAULT_SETTINGS.hideDefaultEffort}" data-parent-off="${!DEFAULT_SETTINGS.modelEffortPicker}">
+          <label class="setting-check">
+            <input id="setting-hide-default-effort" name="hideDefaultEffort" type="checkbox"${DEFAULT_SETTINGS.hideDefaultEffort ? ' checked' : ''} />
+            <span data-i18n="hideDefaultEffort"></span>
+          </label>
+        </div>
+        <div class="setting-preview" aria-hidden="true">
+          <div class="pv-mp">
+            <span class="pv-mp-bubble">⋯</span>
+            <span class="pv-pill pv-mp-pill"><span class="pv-mp-name">Argon</span><span class="pv-mp-effort">High</span></span>
+          </div>
+        </div>
+        <div class="setting-pair-item" data-setting-card="customizeModelList" data-checked="${DEFAULT_SETTINGS.customizeModelList}" data-parent-off="${!DEFAULT_SETTINGS.modelEffortPicker}">
+          <label class="setting-check">
+            <input id="setting-customize-model-list" name="customizeModelList" type="checkbox"${DEFAULT_SETTINGS.customizeModelList ? ' checked' : ''} />
+            <span data-i18n="customizeModelList"></span>
+          </label>
+        </div>
+      </div>
+      <div class="pv-model-list" id="setting-model-list" data-toggle-setting="hiddenModels" role="group"></div>
+    </div>
     ${renderCheckCard({ id: 'setting-highlight-active-model', key: 'highlightActiveModel', checked: false })}
     ${renderCheckCard({ id: 'setting-hide-unavailable-quota', key: 'hideUnavailableQuota', checked: DEFAULT_SETTINGS.hideUnavailableQuota })}
     ${renderCheckCard({ id: 'setting-quota-dividers', key: 'showQuotaDividers', checked: DEFAULT_SETTINGS.showQuotaDividers })}
@@ -1587,7 +1652,7 @@ const UI_HTML = `<!DOCTYPE html>
     </div>
     ${renderCheckCard({ id: 'setting-context-warnings', key: 'showContextWarnings', checked: true })}
     ${renderCheckCard({ id: 'setting-request-errors', key: 'showRequestErrors', checked: true })}
-    ${renderCheckCard({ id: 'setting-notify-cdp-restart', key: 'notifyCdpRestart', checked: DEFAULT_SETTINGS.notifyCdpRestart })}
+    ${renderCheckCard({ id: 'setting-notify-cdp-restart', helpId: 'notify-cdp-restart', key: 'notifyCdpRestart', tip: 'cdpRestartPreview', checked: DEFAULT_SETTINGS.notifyCdpRestart })}
     <div class="setting-card setting-speed-pair metric-setting" data-setting-card="showSpeed" data-checked="true" data-speed-fx="false">
       <div class="setting-head setting-pair-head">
         <div class="setting-pair-item">
@@ -1758,6 +1823,7 @@ const UI_HTML = `<!DOCTYPE html>
           document.getElementById('sidebar-' + name).hidden = !selected;
         }
         if (view === 'stats' && lastData) renderData(lastData);
+        if (view === 'settings') renderModelList();
         renderHealthNotice();
         window.scrollTo({ top: sidebarScroll[view], behavior: 'instant' });
       }
@@ -1838,6 +1904,16 @@ const UI_HTML = `<!DOCTYPE html>
       if (speedCard) speedCard.dataset.speedFx = String(prefs.showSpeed !== false && prefs.speedAnimation === true);
       const speedAnimCard = document.querySelector('[data-setting-card="speedAnimation"]');
       if (speedAnimCard) speedAnimCard.dataset.parentOff = String(prefs.showSpeed === false);
+      const modelPickerCard = document.querySelector('[data-setting-card="modelEffortPicker"]');
+      if (modelPickerCard) {
+        modelPickerCard.dataset.keepNative = String(prefs.keepNativeModelEntry !== false);
+        modelPickerCard.dataset.customizeModels = String(prefs.modelEffortPicker === true && prefs.customizeModelList === true);
+      }
+      for (const subKey of ['keepNativeModelEntry', 'hideModelTags', 'hideDefaultEffort', 'customizeModelList']) {
+        const subCard = document.querySelector('[data-setting-card="' + subKey + '"]');
+        if (subCard) subCard.dataset.parentOff = String(prefs.modelEffortPicker !== true);
+      }
+      renderModelList();
       for (const card of document.querySelectorAll('.setting-option-card[data-layout-key]')) card.dataset.layout = prefs[card.dataset.layoutKey] === 'rows' ? 'rows' : 'columns';
       const contextPreview = document.querySelector('[data-preview-group="context"]');
       if (contextPreview) {
@@ -1878,19 +1954,36 @@ const UI_HTML = `<!DOCTYPE html>
       if (!res.ok) throw new Error('Panel request failed: HTTP ' + res.status);
       return res;
     }
+    let pendingPatch = null;
     async function saveSettings(patch) {
-        if (savingSettings) return;
+        if (savingSettings) {
+          pendingPatch = { ...(pendingPatch || {}), ...patch };
+          settingsEpoch++;
+          applySettings(patch);
+          return;
+        }
         const previous = { ...prefs };
         savingSettings = true;
         settingsEpoch++;
         applySettings(patch);
         updateControlState();
         try {
-          const res = await postApi('/api/settings', patch);
-          const data = await res.json();
-          if (!res.ok || data.error) throw new Error('Save failed');
-          applySettings(data, true);
+          let nextPatch = patch;
+          while (nextPatch) {
+            const res = await postApi('/api/settings', nextPatch);
+            const data = await res.json();
+            if (!res.ok || data.error) throw new Error('Save failed');
+            if (pendingPatch) {
+              nextPatch = pendingPatch;
+              pendingPatch = null;
+              applySettings({ ...data, ...nextPatch }, true);
+            } else {
+              nextPatch = null;
+              applySettings(data, true);
+            }
+          }
         } catch {
+          pendingPatch = null;
           applySettings(previous, true);
           if (!panelLocked) window.alert(settingsLabels.saveFailed);
         } finally {
@@ -1935,6 +2028,51 @@ const UI_HTML = `<!DOCTYPE html>
         const patch = { [select.name]: value };
         if (select.name === 'showSpeed' && !value) patch.speedAnimation = false;
         void saveSettings(patch);
+      });
+    }
+    var modelListSig = '';
+    function renderModelList() {
+      const box = document.getElementById('setting-model-list');
+      if (!box) return;
+      const hidden = Array.isArray(prefs.hiddenModels) ? prefs.hiddenModels : [];
+      const all = [...new Set(lastData?.availableModels || [])];
+      const emptyLabel = settingsLabels?.modelPickerEmpty || 'Enable the footer capsule and open an existing conversation to list its models.';
+      const sig = JSON.stringify([all, hidden, emptyLabel]);
+      if (sig === modelListSig) return;
+      modelListSig = sig;
+      box.replaceChildren();
+      if (!all.length) {
+        const note = document.createElement('div');
+        note.className = 'pv-model-empty';
+        note.textContent = emptyLabel;
+        box.append(note);
+        return;
+      }
+      const hiddenSet = new Set(hidden);
+      const disabled = savingSettings || prefs.modelEffortPicker !== true || prefs.customizeModelList !== true;
+      for (const name of all) {
+        const active = !hiddenSet.has(name);
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'pv-swatch pv-model-item';
+        btn.dataset.modelToggle = name;
+        btn.dataset.active = String(active);
+        btn.setAttribute('aria-pressed', String(active));
+        btn.disabled = disabled;
+        btn.textContent = name;
+        box.append(btn);
+      }
+    }
+    const modelListEl = document.getElementById('setting-model-list');
+    if (modelListEl) {
+      modelListEl.addEventListener('click', event => {
+        const btn = event.target.closest('button[data-model-toggle]');
+        if (!btn || btn.disabled) return;
+        const name = btn.dataset.modelToggle;
+        const cur = new Set(Array.isArray(prefs.hiddenModels) ? prefs.hiddenModels : []);
+        if (cur.has(name)) cur.delete(name);
+        else cur.add(name);
+        void saveSettings({ hiddenModels: [...cur] });
       });
     }
     const fieldEditor = document.querySelector('[data-field-editor]');
@@ -2101,7 +2239,10 @@ const UI_HTML = `<!DOCTYPE html>
         // The notice follows the health samples, which can change under an unchanged snapshot.
         renderHealthNotice();
         // Statistics hidden behind the settings tab are not refreshed; they catch up when it is left.
-        if (sidebarView !== 'stats') return;
+        if (sidebarView !== 'stats') {
+          renderModelList();
+          return;
+        }
         const cache = presentation.cacheView(d, prefs);
         paintCacheIndicator(cache);
         // Everything else is repainted only when the snapshot, the settings or a clock-driven text
@@ -2173,9 +2314,13 @@ const UI_HTML = `<!DOCTYPE html>
             lastData.deckCdpInfo.shortcutState = result.shortcutState;
             lastData.deckCdpInfo.canFixShortcut = result.shortcutState === 'missing';
           }
-          shortcutFixMessageKey = result?.ok ? 'cdpFixShortcutDone' : 'cdpFixShortcutAdmin';
+          shortcutFixMessageKey = result?.ok ? 'cdpFixShortcutDone'
+            : result?.reason === 'partial' ? 'cdpFixShortcutPartial'
+            : result?.reason === 'not_found' ? 'cdpFixShortcutNotFound'
+            : result?.reason === 'permission' ? 'cdpFixShortcutAdmin'
+            : 'cdpFixShortcutError';
         } catch {
-          shortcutFixMessageKey = 'cdpFixShortcutAdmin';
+          shortcutFixMessageKey = 'cdpFixShortcutError';
         } finally {
           fixingShortcut = false;
           renderHealthNotice();
@@ -2250,7 +2395,10 @@ const UI_HTML = `<!DOCTYPE html>
         const optionCard = control.closest('.setting-option-card');
         const thresholdCard = control.closest('.setting-threshold-card');
         const detailPop = control.closest('.pv-detail-pop');
+        const modelCard = control.closest('.setting-model-card');
         const parentDisabled = (control.name === 'speedAnimation' && prefs.showSpeed === false)
+          || (['keepNativeModelEntry', 'hideModelTags', 'hideDefaultEffort', 'customizeModelList'].includes(control.name) && prefs.modelEffortPicker !== true)
+          || (!!modelCard && !control.closest('.setting-pair-item') && (prefs.modelEffortPicker !== true || prefs.customizeModelList !== true))
           || (!!optionCard && !control.closest('.setting-pair-item') && optionCard.dataset.checked === 'false')
           || (!!thresholdCard && !control.closest('.setting-pair-item') && thresholdCard.dataset.checked === 'false')
           || (!!detailPop && detailPop.dataset.open === 'false');
@@ -2292,10 +2440,12 @@ export async function startPanel(loadSdk = () => import('sidecar_sdk'), env = pr
     body: JSON.stringify({ uiVersion: PANEL_VERSION }) }), 'GET');
   app.api('/api/context', async (data) => {
     const deckCdp = deckInjector?.status?.() ?? 'unknown';
+    const conversationId = data?.conversationId || app.config.conversationId;
     return {
-      ...await inspectConversation(data?.conversationId || app.config.conversationId),
+      ...await inspectConversation(conversationId),
       deckCdp,
       deckCdpInfo: cdpNotice.info(deckCdp),
+      availableModels: deckInjector?.models?.(conversationId) ?? [],
     };
   }, 'POST');
   app.api('/api/settings', (data) => settingsStore.update(data), 'POST');

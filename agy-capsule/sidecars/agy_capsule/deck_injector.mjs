@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
+import { readPickerState, resolveInheritedLabel, syncModelPicker } from './model_picker.mjs';
 import { createPresentation, getPresentationScript } from './ui.mjs';
 
 const { escapeHtml, appearance, cacheView, contextBreakdown, quotaView, makeRingSvg } = createPresentation();
@@ -61,6 +62,7 @@ function pageMount(d) {
     document.removeEventListener('click', node._onOutsideClick);
     document.removeEventListener('keydown', node._onEscape);
     if (node._onResize) window.removeEventListener('resize', node._onResize);
+    node._modelPicker?.dispose();
     node._modelObserver?.disconnect();
     node._resizeObserver?.disconnect();
     if (node._layoutRaf) cancelAnimationFrame(node._layoutRaf);
@@ -86,11 +88,11 @@ function pageMount(d) {
   }
 
   // Upgrade or initialize DOM structure in-place
-  if (root.getAttribute('data-deck-ver') !== '117') {
+  if (root.getAttribute('data-deck-ver') !== '124') {
     release(root);
     root._pinnedGroup = null;
     root.removeAttribute('data-pinned');
-    root.setAttribute('data-deck-ver', '117');
+    root.setAttribute('data-deck-ver', '124');
     root._speedActivity = null;
     root._motionPrev = null;
     root._renderKey = null;
@@ -117,6 +119,104 @@ function pageMount(d) {
 
     root.innerHTML = `
       <style>
+        #deck-metrics-strip button.dk-pill[data-el="modelPicker"],
+        .dk-model-options,
+        .dk-model-sub,
+        .dk-model-tip {
+          font-family: "Google Sans Flex", "Google Sans", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+          font-size: 12px; font-weight: 350; line-height: 16px;
+          font-variation-settings: "ROND" 0, "slnt" 0, "wdth" 92;
+          -webkit-font-smoothing: auto;
+        }
+        #deck-metrics-strip button.dk-pill[data-el="modelPicker"] {
+          display: inline-flex; align-items: center; gap: 4px;
+          height: 28px; max-width: 18em; padding: 0 4px 0 8px; margin-right: 6px; border-radius: 9999px;
+          cursor: pointer; white-space: nowrap;
+          color: var(--secondary-foreground, var(--foreground, inherit));
+        }
+        #deck-metrics-strip button.dk-pill[data-el="modelPicker"] .dk-mp-text {
+          min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        #deck-metrics-strip button.dk-pill[data-el="modelPicker"] .dk-mp-name { color: inherit; }
+        #deck-metrics-strip button.dk-pill[data-el="modelPicker"] .dk-mp-effort { color: inherit; opacity: 0.7; font-weight: 350; }
+        #deck-metrics-strip button.dk-pill[data-el="modelPicker"] .dk-mp-down { width: 14px; height: 14px; flex-shrink: 0; display: block; }
+        #deck-metrics-strip button.dk-pill[data-el="modelPicker"]:hover,
+        #deck-metrics-strip button.dk-pill[data-el="modelPicker"]:focus-visible {
+          background: var(--secondary, rgba(128, 128, 128, 0.12));
+          color: var(--secondary-foreground, var(--foreground, #0a0a0c));
+          outline: none;
+        }
+        .dk-model-options,
+        .dk-model-sub,
+        .dk-model-tip {
+          position: fixed; inset: auto; margin: 0; padding: 4px;
+          border-radius: 12px;
+          border: 1px solid color-mix(in srgb, var(--foreground, #fff) 9%, transparent);
+          background: var(--card, rgb(19, 19, 23));
+          backdrop-filter: blur(22px);
+          box-shadow: 0 1px 0 color-mix(in srgb, var(--foreground, #fff) 8%, transparent) inset, 0 20px 44px -12px rgba(0, 0, 0, 0.38), 0 3px 10px -2px rgba(0, 0, 0, 0.28);
+          color: var(--foreground, CanvasText);
+        }
+        .dk-model-options {
+          min-width: 148px; width: max-content; max-width: min(276px, calc(100vw - 12px));
+          overflow-y: auto; overflow-x: hidden; scrollbar-width: none;
+        }
+        .dk-model-options::-webkit-scrollbar { display: none; }
+        .dk-model-list { display: flex; flex-direction: column; gap: 1px; }
+        .dk-model-row,
+        .dk-model-sub-item {
+          width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 6px;
+          padding: 4px 8px; min-height: 24px; border: 0; border-radius: 7px;
+          background: transparent; color: var(--secondary-foreground, var(--foreground, CanvasText));
+          font: inherit; text-align: left; cursor: pointer; outline: none;
+          transition: background 0.1s ease, color 0.1s ease;
+        }
+        .dk-model-row.dk-model-disabled {
+          opacity: 0.5; cursor: not-allowed;
+        }
+        .dk-model-row:not(.dk-model-disabled):hover:not(:disabled),
+        .dk-model-row:not(.dk-model-disabled):focus-visible:not(:disabled),
+        .dk-model-row[data-sub-open="true"],
+        .dk-model-sub-item:hover:not(:disabled),
+        .dk-model-sub-item:focus-visible:not(:disabled) {
+          background: var(--secondary, rgba(128, 128, 128, 0.14));
+          color: var(--foreground, CanvasText);
+        }
+        .dk-model-row[aria-pressed="true"],
+        .dk-model-sub-item[aria-pressed="true"] {
+          color: var(--foreground, CanvasText);
+        }
+        .dk-model-row:disabled,
+        .dk-model-sub-item:disabled { opacity: 0.55; cursor: progress; }
+        .dk-model-main { display: inline-flex; align-items: center; gap: 6px; min-width: 0; flex: 1; }
+        .dk-model-main .dk-mp-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .dk-model-main .dk-mp-effort { flex-shrink: 0; color: inherit; opacity: 0.7; font-weight: 350; }
+        .dk-mp-badge {
+          display: inline-flex; align-items: center; gap: 4px;
+          flex-shrink: 0; padding: 0 6px; border-radius: 999px;
+          background: var(--secondary, rgba(128, 128, 128, 0.16));
+          color: inherit; opacity: 0.7; font-size: 12px; font-weight: 350; line-height: 16px;
+        }
+        .dk-mp-info { display: inline-flex; align-items: center; flex-shrink: 0; color: inherit; opacity: 0.75; }
+        .dk-mp-badge .dk-mp-info { opacity: 1; }
+        .dk-mp-info:hover { opacity: 1; }
+        .dk-mp-info-svg { width: 12px; height: 12px; display: block; }
+        .dk-mp-end { display: inline-flex; align-items: center; flex-shrink: 0; color: var(--muted-foreground, #8e8e93); }
+        .dk-model-row[aria-pressed="true"] .dk-mp-end,
+        .dk-model-sub-item[aria-pressed="true"] .dk-mp-end { color: var(--foreground, CanvasText); }
+        .dk-mp-check { width: 14px; height: 14px; display: block; }
+        .dk-mp-chev { width: 14px; height: 14px; display: block; opacity: 0.7; }
+        .dk-model-sub {
+          min-width: 104px; flex-direction: column; gap: 1px;
+        }
+        .dk-model-sub:popover-open { display: flex; }
+        .dk-model-tip {
+          max-width: 220px; padding: 6px 10px; border-radius: 10px;
+          color: var(--secondary-foreground, var(--foreground, CanvasText));
+          pointer-events: none; white-space: normal; overflow-wrap: break-word;
+        }
+        .dk-model-options [role="status"] { padding: 6px 8px 2px; color: #e06c75; font-size: 12px; }
+        .dk-model-options [role="status"]:empty { display: none; }
         #deck-metrics-strip, #deck-metrics-strip * { box-sizing: border-box; }
         #deck-metrics-strip .dk-grp {
           display: inline-flex;
@@ -762,6 +862,17 @@ function pageMount(d) {
       document.head.appendChild(nativeStyle);
     }
     nativeStyle.textContent = `
+        .agy-composer-footer button[data-deck-model-bubble="bubble"] {
+          position: relative; width: 22px !important; min-width: 22px !important; max-width: 22px !important;
+          overflow: hidden; padding: 0 !important; font-size: 0 !important; border-radius: 999px;
+        }
+        .agy-composer-footer button[data-deck-model-bubble="bubble"] > * { opacity: 0 !important; }
+        .agy-composer-footer button[data-deck-model-bubble="bubble"]::after { content: '⋯'; position: absolute; inset: 0; display: grid; place-items: center; font-size: 14px; pointer-events: none; }
+        .agy-composer-footer button[data-deck-model-bubble="hidden"] {
+          position: absolute !important; width: 0 !important; min-width: 0 !important; max-width: 0 !important;
+          height: 0 !important; overflow: hidden !important; padding: 0 !important; margin: 0 !important;
+          border: 0 !important; opacity: 0 !important; pointer-events: none !important;
+        }
         .agy-composer-footer button[data-deck-turbo-collapsed="true"] {
           width: 28px !important; min-width: 28px !important; max-width: 28px !important;
           padding: 6px !important; gap: 0 !important; justify-content: center !important;
@@ -835,7 +946,8 @@ function pageMount(d) {
       if (!pop?.getBoundingClientRect().width) return;
       const width = layoutSize(pop, 'width');
       const pill = grp.querySelector('.dk-pill').getBoundingClientRect();
-      const stripLeft = root.getBoundingClientRect().left;
+      const firstGrp = [...root.querySelectorAll('.dk-grp')].find(node => !node.hidden && node.getBoundingClientRect().width > 0);
+      const stripLeft = (firstGrp || root).getBoundingClientRect().left;
       let left = Math.max(stripLeft, pill.right - width);
       left = Math.max(minLeft, Math.min(left, maxRight - width));
       pop.style.left = (left - grp.getBoundingClientRect().left) + 'px';
@@ -908,11 +1020,23 @@ function pageMount(d) {
   const cancelBtnVisible = !!footerLeft.parentElement.querySelector('[data-testid="input-cancel-button"]');
   const waiting = cancelBtnVisible || !!d.turnQueue?.hasPendingPlanner;
   const alertData = { ...d.contextData, requestError: d.requestError, turnQueue: d.turnQueue };
+  const pickerKey = () => {
+    if (d.prefs?.modelEffortPicker !== true && !root._modelPicker) return null;
+    const trigger = footerLeft.querySelector('button[data-testid="model-selector-trigger"]');
+    let state = null;
+    try { state = trigger ? readPickerState(trigger) : null; } catch {}
+    return [
+      Boolean(root._modelPicker),
+      root._modelPicker ? root._modelPicker.trigger === trigger : true,
+      state ? [state.conversationId, state.selected, state.items] : null,
+    ];
+  };
   const renderKey = () => JSON.stringify([
     { ...d, cacheIconSvg: '', cacheProgressPct: '', cacheProgressColor: '' },
     location.pathname, cancelBtnVisible, root._speedActivity?.coolUntil > now,
     presentation.alertView(alertData, d.prefs, undefined, now, waiting).label,
     d.turnMetrics && presentation.turnMetricsText(d.turnMetrics, undefined, now).elapsed,
+    pickerKey(),
     [root, ...footerLeft.parentElement.children].map(el => { const r = el.getBoundingClientRect(); return [Math.round(r.left), Math.round(r.right)]; }),
   ]);
   if (footerLeft.contains(host) && root._renderKey === renderKey()) {
@@ -924,6 +1048,7 @@ function pageMount(d) {
     footerLeft.appendChild(host);
   }
   const labels = presentation.apply(root, d.prefs);
+  syncModelPicker(root, footerLeft, d.prefs, labels, findFooterLeft);
   presentation.renderContextTooltips(root, d.contextData, labels);
   const alerts = presentation.renderAlerts(root, alertData, d.prefs, labels, now, waiting);
   root.querySelector('[data-el="grpQuota"]').hidden = d.cloudPaygo;
@@ -1115,6 +1240,14 @@ function pageMount(d) {
         for (const child of node.children) walk(child, parentClip);
         return;
       }
+      if (node.hasAttribute?.('data-deck-model-bubble')) {
+        const r = node.getBoundingClientRect();
+        if (r.width > 0 || r.height > 0) {
+          const visR = Math.min(r.right, parentClip);
+          if (visR > maxR) maxR = visR;
+        }
+        return;
+      }
       const tag = node.tagName ? node.tagName.toLowerCase() : '';
       const r = node.getBoundingClientRect();
       if (r.width > 0 || r.height > 0) {
@@ -1149,6 +1282,7 @@ function pageMount(d) {
     try {
     const footer = footerLeft.parentElement;
     if (!footer || footer.getBoundingClientRect().width <= 0) return;
+    root._modelPicker?.setBubble(true);
     const visible = el => {
       const style = getComputedStyle(el);
       const rect = el.getBoundingClientRect();
@@ -1156,13 +1290,14 @@ function pageMount(d) {
     };
     const children = Array.from(footerLeft.children);
     const nativeChildren = children.slice(0, children.indexOf(host)).filter(el => visible(el) || el.classList.contains('dk-model-squeezed'));
-    const modelTargets = nativeChildren.filter((c) => c.textContent && c.textContent.trim().length > 0);
+    const modelTargets = nativeChildren.filter((c) => c.textContent && c.textContent.trim().length > 0 && !c.hasAttribute('data-deck-model-bubble') && !c.querySelector('[data-deck-model-bubble]'));
     const turbo = footer.querySelector('[data-testid="permissions-selector-trigger"]');
     if (root._turboTarget && root._turboTarget !== turbo) root._turboTarget.removeAttribute('data-deck-turbo-collapsed');
     root._turboTarget = turbo;
 
     const isClippedEl = (el) => {
       if (el instanceof SVGElement) return false;
+      if (el.hasAttribute?.('data-deck-model-bubble') || el.closest?.('[data-deck-model-bubble]')) return false;
       const overflow = getComputedStyle(el).overflowX;
       if (overflow !== 'hidden' && overflow !== 'clip') return false;
       if (el.scrollWidth <= el.clientWidth + 2) return false;
@@ -1273,10 +1408,11 @@ function pageMount(d) {
         rootRect.right <= rightMinLeft - 4 &&
         rootRect.right <= footerRightEdge + 1 &&
         rootRect.right <= flClipRight;
-      const fitsLeft = nativeMaxRight === -Infinity || rootRect.left >= nativeMaxRight + 1;
+      const fitsLeft = nativeMaxRight === -Infinity || rootRect.left >= nativeMaxRight - 0.5;
       const crowdedModel = !mode.compress && minRightBound - rootRect.right < 24 && isNativeSqueezed();
       if (fitsRight && fitsLeft && !(mode.compress && anySvgClipped) && !crowdedModel) break;
     }
+    if (root.classList.contains('dk-hide-all')) root._modelPicker?.setBubble(false);
     } finally {
       root._adjustingLayout = false;
     }
@@ -1307,6 +1443,7 @@ function pageMount(d) {
         lateLegacy.remove();
         if (globalThis.__agyCapsuleDeck) window.__deckOwnerTs = globalThis.__agyCapsuleDeck.owner;
       }
+      root._modelPicker?.sync?.();
       if (root._applyModelQuota) root._applyModelQuota();
       root._scheduleLayout?.();
     });
@@ -1497,7 +1634,19 @@ function installRuntime(owner, hash) {
     owner, hash,
     readState(caller) {
       if (caller < owner) return 'superseded';
-      return { owner, hash, path: location.pathname, hasFooter: !!findFooterLeft() };
+      const footer = findFooterLeft();
+      let modelConversationId = null, modelFamilies = null;
+      if (footer) {
+        try {
+          const trigger = footer.querySelector('button[data-testid="model-selector-trigger"]');
+          const pickerState = trigger && readPickerState(trigger);
+          if (pickerState?.families?.length) {
+            modelConversationId = pickerState.conversationId;
+            modelFamilies = pickerState.families;
+          }
+        } catch {}
+      }
+      return { owner, hash, path: location.pathname, hasFooter: !!footer, modelConversationId, modelFamilies };
     },
     apply(next, path, caller) {
       if (caller < owner) return 'superseded';
@@ -1522,7 +1671,7 @@ function installRuntime(owner, hash) {
 }
 
 export function buildRuntimeBundle(owner = INSTANCE_TS) {
-  const functions = [toView, findFooterLeft, layoutSize, pageMount, installRuntime].map(fn => fn.toString()).join('\n');
+  const functions = [toView, findFooterLeft, layoutSize, resolveInheritedLabel, readPickerState, syncModelPicker, pageMount, installRuntime].map(fn => fn.toString()).join('\n');
   const source = getPresentationScript() + '\n' + functions;
   const hash = createHash('sha256').update(source).digest('hex').slice(0, 16);
   const code = `(()=>{const INSTANCE_TS=${Number(owner)};if(globalThis.__agyCapsuleDeck?.owner>INSTANCE_TS)return 'superseded';${getPresentationScript()}\nconst {escapeHtml,appearance,cacheView,contextBreakdown,quotaView,makeRingSvg}=globalThis.__agyCapsulePresentation;\n${functions}\nreturn installRuntime(INSTANCE_TS,${JSON.stringify(hash)});})()`;
@@ -1580,6 +1729,7 @@ export function startDeckInjector(inspect, options = {}) {
   let busy = false;
   // 'unknown' until the first lookup; the sidebar explains 'missing' / 'unreachable'.
   let cdpState = 'unknown';
+  let availableModels = new Map();
   let discovery = 'unknown', noAnchorSince = null, failedRounds = 0;
   const now = options.now || Date.now;
   const composerOrigin = createComposerOriginResolver(options.productRoots, options.env, now);
@@ -1672,6 +1822,7 @@ export function startDeckInjector(inspect, options = {}) {
   const stop = async () => {
     if (stopped) return;
     stopped = true;
+    availableModels.clear();
     clearInterval(timer);
     await Promise.all([...sockets].map(async ([id, entry]) => {
       try { await evaluate(entry, entry.context, `globalThis.__agyCapsuleDeck?.owner===${owner}&&globalThis.__agyCapsuleDeck.dispose()`); }
@@ -1685,6 +1836,7 @@ export function startDeckInjector(inspect, options = {}) {
   const tick = async () => {
     if (busy || stopped) return;
     busy = true;
+    const nextModels = new Map();
     try {
       const list = await pages();
       let noAnchor = 0, failed = 0;
@@ -1708,6 +1860,9 @@ export function startDeckInjector(inspect, options = {}) {
           if (state?.owner !== owner || !state.path) { failed++; continue; }
           if (state.hasFooter !== true) { noAnchor++; continue; }
           const match = state.path.match(/\/c\/([0-9a-f-]{36})/);
+          if (match && state.modelConversationId === match[1] && Array.isArray(state.modelFamilies) && state.modelFamilies.length > 0) {
+            nextModels.set(match[1], state.modelFamilies);
+          }
           // Data-source failures belong to the sidebar health path, not to CDP.
           const data = await Promise.resolve().then(() => inspect(match ? match[1] : '', true)).catch(() => null);
           if (!data || data.error || stopped) continue;
@@ -1733,9 +1888,12 @@ export function startDeckInjector(inspect, options = {}) {
       cdpState = discovery !== 'ok' ? discovery : failedRounds >= 3 ? 'inject-failed'
         : noAnchorSince !== null && now() - noAnchorSince >= 60_000 ? 'no-anchor' : 'ok';
       options.onStatus?.(cdpState);
-    } finally { busy = false; }
+    } finally {
+      if (!stopped) availableModels = nextModels;
+      busy = false;
+    }
   };
   const timer = setInterval(tick, INTERVAL_MS);
   console.log('[deck] injector started, port file:', options.portFile || PORT_FILE);
-  return { tick, stop, status: () => cdpState };
+  return { tick, stop, status: () => cdpState, models: conversationId => availableModels.get(conversationId) ?? [] };
 }
