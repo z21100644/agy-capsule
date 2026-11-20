@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'no
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-export const DEFAULT_SETTINGS = Object.freeze({ language: 'en', settingsLanguage: 'zh-CN', uiSkin: 'native', panelLayout: 'natural', density: 'compact', quotaIndicator: 'ring', cacheIndicator: 'icon', cacheHitFormat: 'percent', labelCase: 'lowercase', resetFormat: 'compact', popAnimation: false, contextLayout: 'columns', turnLayout: 'columns', contextMarker: 'square', turnMarker: 'square', showContextBreakdown: true, columnLabel: true, columnValue: true, columnPercent: false, columnOrder: 'label,value,percent', highlightContextHover: false, highlightActiveModel: false, hideUnavailableQuota: true, showQuotaDividers: true, showCacheWarnings: true, cacheWarnMin: 3, cacheColdMin: 4, showContextWarnings: true, showRequestErrors: true, notifyCdpRestart: true, showSpeed: true, speedAnimation: false, showRequestMetrics: true, compactTelemetryBar: false, telemetryBarPosition: 'bottom', showTurnMetrics: false, showUsageActivity: false, showModelUsage: false, showQueueWarnings: true, queueWarnSec: 30 });
+export const DEFAULT_SETTINGS = Object.freeze({ language: 'en', settingsLanguage: 'zh-CN', uiSkin: 'native', panelLayout: 'natural', density: 'compact', quotaIndicator: 'ring', cacheIndicator: 'icon', cacheHitFormat: 'percent', labelCase: 'lowercase', resetFormat: 'compact', popAnimation: false, contextLayout: 'columns', turnLayout: 'columns', contextMarker: 'square', turnMarker: 'square', showContextBreakdown: true, columnLabel: true, columnValue: true, columnPercent: false, columnOrder: 'label,value,percent', highlightContextHover: false, highlightActiveModel: false, modelEffortPicker: false, keepNativeModelEntry: true, hideModelTags: false, hideDefaultEffort: false, customizeModelList: false, hiddenModels: Object.freeze([]), hideUnavailableQuota: true, showQuotaDividers: true, showCacheWarnings: true, cacheWarnMin: 3, cacheColdMin: 4, showContextWarnings: true, showRequestErrors: true, notifyCdpRestart: true, showSpeed: true, speedAnimation: false, showRequestMetrics: true, compactTelemetryBar: false, telemetryBarPosition: 'bottom', showTurnMetrics: false, showUsageActivity: false, showModelUsage: false, showQueueWarnings: true, queueWarnSec: 30 });
 const choices = {
   language: ['en', 'zh-CN', 'zh-TW'],
   settingsLanguage: ['en', 'zh-CN', 'zh-TW'],
@@ -25,6 +25,11 @@ const choices = {
   columnPercent: [true, false],
   columnOrder: ['label,value,percent', 'label,percent,value', 'value,label,percent', 'value,percent,label', 'percent,label,value', 'percent,value,label'],
   highlightContextHover: [true, false],
+  modelEffortPicker: [true, false],
+  keepNativeModelEntry: [true, false],
+  hideModelTags: [true, false],
+  hideDefaultEffort: [true, false],
+  customizeModelList: [true, false],
   highlightActiveModel: [true, false],
   hideUnavailableQuota: [true, false],
   showQuotaDividers: [true, false],
@@ -55,7 +60,10 @@ export function validateSettings(raw) {
   const validNumbers = Object.entries(numericRanges)
     .filter(([key, [min, max]]) => typeof raw?.[key] === 'number' && Number.isInteger(raw[key]) && raw[key] >= min && raw[key] <= max)
     .map(([key]) => [key, raw[key]]);
-  return Object.fromEntries([...validChoices, ...validNumbers]);
+  const validLists = Array.isArray(raw?.hiddenModels)
+    ? [['hiddenModels', [...new Set(raw.hiddenModels.filter(item => typeof item === 'string' && item.trim()).map(item => item.trim()))].slice(0, 200)]]
+    : [];
+  return Object.fromEntries([...validChoices, ...validNumbers, ...validLists]);
 }
 
 export function normalizeSettings(raw = {}) {
@@ -73,6 +81,7 @@ export function normalizeSettings(raw = {}) {
     else next.cacheWarnMin = next.cacheColdMin - 1;
   }
   if (next.showSpeed === false) next.speedAnimation = false;
+  next.hiddenModels = [...(next.hiddenModels || [])];
   return next;
 }
 
@@ -89,11 +98,13 @@ export function createSettingsStore(filePath = join(homedir(), '.gemini', 'confi
         cached = normalizeSettings(raw);
         lastStat = key;
       }
-    } catch {
-      cached = { ...DEFAULT_SETTINGS };
-      lastStat = '';
+    } catch (error) {
+      if (error?.code === 'ENOENT' || error instanceof SyntaxError) {
+        cached = { ...DEFAULT_SETTINGS };
+        lastStat = '';
+      }
     }
-    return { ...cached };
+    return { ...cached, hiddenModels: [...(cached.hiddenModels || [])] };
   }
   function update(patch) {
     const current = read();

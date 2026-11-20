@@ -39,13 +39,14 @@ test('CDP installs code once, skips unchanged payloads, updates on navigation, a
   const owner = Date.now(), hash = buildRuntimeBundle(owner).hash;
   let now = owner, installed = false, path = '/', pageExists = true, hasFooter = true, inspections = 0, injections = 0, pushes = 0, lists = 0, next = { contextTokens: 100 };
   let allowInstall = true, allowApply = true;
+  let modelStates = {};
   const connections = [];
   const origin = 'https://127.0.0.1:5351';
   const emitContext = (socket, origin, uniqueId) => socket.onmessage({ data: JSON.stringify({
     method: 'Runtime.executionContextCreated', params: { context: { origin, uniqueId, auxData: { isDefault: true, frameId: 'frame' } } },
   }) });
   class FakeSocket {
-    constructor() { this.readyState = 0; connections.push(this); queueMicrotask(() => { this.readyState = 1; this.onopen?.(); }); }
+    constructor(url) { this.id = new URL(url).pathname.split('/').at(-1); this.readyState = 0; connections.push(this); queueMicrotask(() => { this.readyState = 1; this.onopen?.(); }); }
     send(raw) {
       const { id, method, params: { expression, uniqueContextId } } = JSON.parse(raw);
       if (method !== 'Runtime.evaluate') {
@@ -56,7 +57,7 @@ test('CDP installs code once, skips unchanged payloads, updates on navigation, a
       assert.equal(uniqueContextId, 'document-1');
       let value;
       if (expression.includes('function installRuntime')) { injections++; installed = allowInstall; value = installed; }
-      else if (expression.includes('.readState(')) value = installed ? { owner, hash, path, hasFooter } : null;
+      else if (expression.includes('.readState(')) value = installed ? { owner, hash, path, hasFooter, ...modelStates[this.id] } : null;
       else if (expression.includes('.apply(')) { pushes++; value = allowApply; }
       queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ id, result: { result: { value } } }) }));
     }
@@ -130,6 +131,25 @@ test('CDP installs code once, skips unchanged payloads, updates on navigation, a
     let timeout;
     try { await Promise.race([injector.tick(), new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('Pending evaluation was not released')), 300); })]); }
     finally { clearTimeout(timeout); }
+
+    // A settings sidebar must use the options from its conversation, not the last composer polled.
+    const first = '11111111-1111-1111-1111-111111111111';
+    const second = '22222222-2222-2222-2222-222222222222';
+    modelStates = {
+      page: { path: '/c/' + first, modelConversationId: first, modelFamilies: ['Argon'] },
+      'second-page': { path: '/c/' + second, modelConversationId: second, modelFamilies: ['Claude'] },
+    };
+    mixed = true; now += 5000; await injector.tick();
+    assert.deepEqual(injector.models(first), ['Argon']);
+    assert.deepEqual(injector.models(second), ['Claude']);
+    assert.deepEqual(injector.models(), [], 'a sidebar with no conversation must not inherit another page');
+
+    modelStates['second-page'].modelConversationId = first;
+    await injector.tick();
+    assert.deepEqual(injector.models(second), [], 'ignore a retained selector from a different conversation');
+    assert.deepEqual(injector.models(first), ['Argon']);
+    pageExists = false; now += 5000; await injector.tick();
+    assert.deepEqual(injector.models(first), [], 'closed composers do not leave a stale model list');
   } finally {
     await injector?.stop();
     globalThis.fetch = originals.fetch; globalThis.WebSocket = originals.WebSocket; Date.now = originals.now;

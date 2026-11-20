@@ -5,62 +5,71 @@ import { dirname, join } from 'node:path';
 
 const DEFAULT_STATE_PATH = join(homedir(), '.gemini', 'config', 'agy-capsule', 'cdp_state.json');
 
-const SHORTCUT_SCAN_PS = `
-$ErrorActionPreference = 'SilentlyContinue'
-$dirs = @(
+const DEFAULT_SHORTCUT_DIRS_PS = `@(
   [Environment]::GetFolderPath('Desktop'),
   [Environment]::GetFolderPath('CommonDesktopDirectory'),
   [Environment]::GetFolderPath('StartMenu'),
   [Environment]::GetFolderPath('CommonStartMenu'),
   (Join-Path $env:APPDATA 'Microsoft\\Internet Explorer\\Quick Launch\\User Pinned\\TaskBar')
-) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
+)`;
+
+const SHORTCUT_SCAN_PS = `
 $pattern = '(^|\\s)--remote-debugging-port(=\\S*)?(?=\\s|$)'
 $shell = New-Object -ComObject WScript.Shell
 $total = 0; $missing = 0
-foreach ($d in $dirs) {
-  foreach ($f in Get-ChildItem -LiteralPath $d -Recurse -Filter *.lnk) {
-    $l = $shell.CreateShortcut($f.FullName)
-    if ($l.TargetPath -and (Split-Path -Leaf $l.TargetPath) -eq 'Antigravity.exe') {
-      $total++
-      if ([string]$l.Arguments -notmatch $pattern) { $missing++ }
-    }
+foreach ($f in $files) {
+  $l = $null
+  try { $l = $shell.CreateShortcut($f.FullName) } catch { continue }
+  if (-not $l) { continue }
+  if ($l.TargetPath -and (Split-Path -Leaf $l.TargetPath) -eq 'Antigravity.exe') {
+    $total++
+    if ([string]$l.Arguments -notmatch $pattern) { $missing++ }
   }
 }
-if ($total -eq 0) { 'unknown' } elseif ($missing -gt 0) { 'missing' } else { 'ok' }
+if ($missing -gt 0) { 'missing' } elseif ($listingErrors.Count) { 'incomplete' } elseif ($total -eq 0) { 'unknown' } else { 'ok' }
 `;
 
 const SHORTCUT_FIX_PS = `
-$ErrorActionPreference = 'SilentlyContinue'
-$dirs = @(
-  [Environment]::GetFolderPath('Desktop'),
-  [Environment]::GetFolderPath('CommonDesktopDirectory'),
-  [Environment]::GetFolderPath('StartMenu'),
-  [Environment]::GetFolderPath('CommonStartMenu'),
-  (Join-Path $env:APPDATA 'Microsoft\\Internet Explorer\\Quick Launch\\User Pinned\\TaskBar')
-) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
 $pattern = '(^|\\s)--remote-debugging-port(=\\S*)?(?=\\s|$)'
 $shell = New-Object -ComObject WScript.Shell
-$total = 0; $updated = 0; $failed = 0; $stillMissing = 0
-foreach ($d in $dirs) {
-  foreach ($f in Get-ChildItem -LiteralPath $d -Recurse -Filter *.lnk) {
-    $l = $shell.CreateShortcut($f.FullName)
-    if ($l.TargetPath -and (Split-Path -Leaf $l.TargetPath) -eq 'Antigravity.exe') {
-      $total++
-      $args = [string]$l.Arguments
-      if ($args -match $pattern) { continue }
-      try {
-        $l.Arguments = "$args --remote-debugging-port=0".Trim()
-        $l.Save()
-        $updated++
-      } catch {
+$total = 0; $updated = 0; $failed = 0; $verificationFailed = $false
+foreach ($f in $files) {
+  $l = $null
+  try { $l = $shell.CreateShortcut($f.FullName) } catch { continue }
+  if (-not $l) { continue }
+  if ($l.TargetPath -and (Split-Path -Leaf $l.TargetPath) -eq 'Antigravity.exe') {
+    $total++
+    $arguments = [string]$l.Arguments
+    if ($arguments -match $pattern) { continue }
+    $expected = "$arguments --remote-debugging-port=0".Trim()
+    try {
+      $l.Arguments = $expected
+      # WScript.Shell can silently truncate long arguments. Keep the original file in that case.
+      if ([string]$l.Arguments -cne $expected) {
+        $verificationFailed = $true
         $failed++
-        $stillMissing++
+        continue
       }
+      $l.Save()
+    } catch {
+      $failed++
+      continue
     }
+    try {
+      $saved = $shell.CreateShortcut($f.FullName)
+      if ([string]$saved.Arguments -ceq $expected) {
+        $updated++
+        continue
+      }
+    } catch {}
+    $verificationFailed = $true
+    $failed++
   }
 }
-$state = if ($total -eq 0) { 'unknown' } elseif ($stillMissing -gt 0) { 'missing' } else { 'ok' }
-Write-Output ("$state,$updated,$failed,$total")
+$status = if ($listingErrors.Count) {
+  if ($total -gt 0 -and $failed -eq 0) { 'partial' } else { 'incomplete' }
+} elseif ($verificationFailed) { 'unverified' } elseif ($failed -gt 0) { 'missing' } elseif ($total -eq 0) { 'unknown' } else { 'ok' }
+Write-Output ("$status,$updated,$failed,$total")
 `;
 
 const WIN_NOTIFY_PS = `
@@ -93,12 +102,17 @@ export function createCdpNoticeManager(options = {}) {
   const getPrefs = options.getPrefs || (() => ({}));
   const getNotifyText = options.getNotifyText || (() => ({ title: '', body: '' }));
   const execFileImpl = options.execFileImpl || execFile;
+  const now = options.now || Date.now;
+  const shortcutRetryMs = options.shortcutRetryMs ?? 60_000;
 
   let persisted = loadState();
   let consecutiveFails = 0;
   let shortcutState = 'unknown'; // 'unknown' | 'ok' | 'missing'
   let shortcutChecked = false;
+  let shortcutNextRetryAt = 0;
   let shortcutPromise = null;
+  let fixPromise = null;
+  let shortcutRevision = 0;
   let notified = false;
   let lastStatus = 'unknown';
 
@@ -127,17 +141,44 @@ export function createCdpNoticeManager(options = {}) {
     } catch {}
   }
 
+  function runShortcutScript(script) {
+    const roots = options.shortcutDirectories;
+    const source = roots === undefined ? DEFAULT_SHORTCUT_DIRS_PS : '(ConvertFrom-Json $env:AGY_CDP_TEST_ROOTS)';
+    const command = `$ErrorActionPreference = 'Stop'
+$listingErrors = @()
+$files = foreach ($d in ${source} | Where-Object { $_ } | Select-Object -Unique) {
+  if (Test-Path -LiteralPath $d -PathType Container -ErrorAction SilentlyContinue -ErrorVariable +listingErrors) {
+    Get-ChildItem -LiteralPath $d -Recurse -Filter *.lnk -File -ErrorAction SilentlyContinue -ErrorVariable +listingErrors
+  }
+}
+${script}`;
+    const env = roots === undefined ? process.env : { ...process.env, AGY_CDP_TEST_ROOTS: JSON.stringify(roots) };
+    return runExec(execFileImpl, 'powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { env });
+  }
+
   async function checkShortcuts() {
     if (platform !== 'win32') return 'unknown';
+    if (fixPromise) return (await fixPromise).shortcutState;
     if (shortcutPromise) return shortcutPromise;
-    shortcutPromise = (async () => {
-      const res = await runExec(execFileImpl, 'powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', SHORTCUT_SCAN_PS]);
+    const rev = shortcutRevision;
+    const pending = (async () => {
+      const res = await runShortcutScript(SHORTCUT_SCAN_PS);
       const line = res.stdout.split(/\r?\n/).map(s => s.trim()).filter(Boolean).at(-1);
-      if (line === 'ok' || line === 'missing' || line === 'unknown') shortcutState = line;
-      shortcutChecked = true;
+      if (rev === shortcutRevision) {
+        shortcutChecked = res.ok && (line === 'ok' || line === 'missing' || line === 'unknown');
+        if (shortcutChecked) {
+          shortcutState = line;
+          shortcutNextRetryAt = 0;
+        } else {
+          shortcutNextRetryAt = now() + shortcutRetryMs;
+        }
+      }
       return shortcutState;
-    })().finally(() => { shortcutPromise = null; });
-    return shortcutPromise;
+    })().finally(() => {
+      if (shortcutPromise === pending) shortcutPromise = null;
+    });
+    shortcutPromise = pending;
+    return pending;
   }
 
   async function sendOsNotification(title, body) {
@@ -172,7 +213,7 @@ export function createCdpNoticeManager(options = {}) {
       notified = true;
       return false;
     }
-    if (platform === 'win32' && !shortcutChecked) await checkShortcuts();
+    if (platform === 'win32' && !shortcutChecked && now() >= shortcutNextRetryAt) await checkShortcuts();
     if (notified || persisted.lastOkSession === sessionId || !['missing', 'unreachable'].includes(lastStatus)) return false;
     notified = true;
     persisted.lastNotifiedSession = sessionId;
@@ -186,7 +227,6 @@ export function createCdpNoticeManager(options = {}) {
     lastStatus = cdpState;
     if (cdpState === 'ok') {
       consecutiveFails = 0;
-      shortcutState = 'ok';
       if (persisted.lastOkSession !== sessionId) {
         persisted.everOk = true;
         persisted.lastOkAt = Date.now();
@@ -197,7 +237,7 @@ export function createCdpNoticeManager(options = {}) {
     }
     if (cdpState !== 'missing' && cdpState !== 'unreachable') { consecutiveFails = 0; return; }
     consecutiveFails++;
-    if (platform === 'win32' && !shortcutChecked) {
+    if (platform === 'win32' && !shortcutChecked && now() >= shortcutNextRetryAt) {
       void checkShortcuts();
     }
     if (consecutiveFails >= failThreshold && !notified) {
@@ -206,18 +246,40 @@ export function createCdpNoticeManager(options = {}) {
   }
 
   async function fixShortcuts() {
-    if (platform !== 'win32') return { ok: false, updated: 0, failed: 0, total: 0, shortcutState };
-    const res = await runExec(execFileImpl, 'powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', SHORTCUT_FIX_PS]);
-    const line = res.stdout.split(/\r?\n/).map(s => s.trim()).filter(Boolean).at(-1) || '';
-    const [nextState, updatedStr, failedStr, totalStr] = line.split(',');
-    const updated = Number(updatedStr) || 0;
-    const failed = Number(failedStr) || 0;
-    const total = Number(totalStr) || 0;
-    if (nextState === 'ok' || nextState === 'missing' || nextState === 'unknown') {
-      shortcutState = nextState;
-      shortcutChecked = true;
+    if (platform !== 'win32') {
+      return { ok: false, reason: 'unsupported', updated: 0, failed: 0, total: 0, shortcutState };
     }
-    return { ok: res.ok && shortcutState === 'ok', updated, failed, total, shortcutState };
+    if (fixPromise) return fixPromise;
+    shortcutRevision++;
+    shortcutPromise = null;
+    const pending = (async () => {
+      const res = await runShortcutScript(SHORTCUT_FIX_PS);
+      const line = res.stdout.split(/\r?\n/).map(s => s.trim()).filter(Boolean).at(-1) || '';
+      const [status, updatedStr, failedStr, totalStr] = line.split(',');
+      const updated = Number(updatedStr) || 0;
+      const failed = Number(failedStr) || 0;
+      const total = Number(totalStr) || 0;
+      const partial = res.ok && status === 'partial';
+      const nextState = status === 'unverified' ? 'missing' : status;
+      shortcutChecked = res.ok && (nextState === 'ok' || nextState === 'missing' || nextState === 'unknown');
+      if (shortcutChecked) {
+        shortcutState = nextState;
+        shortcutNextRetryAt = 0;
+      } else {
+        if (partial) shortcutState = 'unknown';
+        shortcutNextRetryAt = now() + shortcutRetryMs;
+      }
+      const reason = partial ? 'partial'
+        : !shortcutChecked || status === 'unverified' ? 'error'
+        : nextState === 'ok' ? 'ok'
+        : nextState === 'unknown' ? 'not_found'
+        : 'permission';
+      return { ok: reason === 'ok', reason, updated, failed, total, shortcutState };
+    })().finally(() => {
+      if (fixPromise === pending) fixPromise = null;
+    });
+    fixPromise = pending;
+    return pending;
   }
 
   function info(cdpState = lastStatus) {

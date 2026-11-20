@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { createContext, runInContext } from 'node:vm';
 import { startDeckInjector } from '../agy-capsule/sidecars/agy_capsule/deck_injector.mjs';
 import { createCdpNoticeManager } from '../agy-capsule/sidecars/agy_capsule/cdp_notice.mjs';
 import { UI_HTML } from '../agy-capsule/sidecars/agy_capsule/server.mjs';
@@ -51,14 +52,51 @@ test('sidebar ships the CDP notice on both tabs with the script command and tran
   assert.ok(notice > 0 && notice < UI_HTML.indexOf('id="sidebar-stats"'), 'notice sits above both tabs, so settings shows it too');
   const { dictionaries } = createPresentation();
   for (const language of ['en', 'zh-CN', 'zh-TW']) {
-    for (const key of ['cdpTitle', 'cdpBody', 'cdpHow', 'cdpScript', 'cdpManual', 'cdpRestart', 'cdpRestartTitle', 'cdpRestartBodyShortcutOk', 'cdpRestartBodyShortcutMissing', 'cdpRestartBodyGeneric', 'cdpRestartHow', 'cdpFixShortcutBtn', 'cdpNotifyTitle', 'cdpNotifyBodyOk', 'cdpNotifyBodyMissing', 'notifyCdpRestart']) {
+    for (const key of ['cdpTitle', 'cdpBody', 'cdpHow', 'cdpScript', 'cdpManual', 'cdpRestart', 'cdpRestartTitle', 'cdpRestartBodyShortcutOk', 'cdpRestartBodyShortcutMissing', 'cdpRestartBodyGeneric', 'cdpRestartHow', 'cdpFixShortcutBtn', 'cdpFixShortcutDone', 'cdpFixShortcutAdmin', 'cdpFixShortcutNotFound', 'cdpFixShortcutError', 'cdpNotifyTitle', 'cdpNotifyBodyOk', 'cdpNotifyBodyMissing', 'notifyCdpRestart']) {
       assert.ok(dictionaries[language][key], `${language}.${key}`);
     }
     for (const key of ['healthCode', 'healthS2', 'healthS3', 'healthS4', 'healthS5', 'healthF2', 'healthF3', 'healthF4']) assert.ok(dictionaries[language][key], key);
   }
   assert.ok(UI_HTML.includes('id="cdp-fix-btn"'));
   assert.ok(UI_HTML.includes('/api/fix-cdp-shortcut'));
+  assert.ok(UI_HTML.includes('cdpFixShortcutNotFound'));
+  assert.ok(UI_HTML.includes('cdpFixShortcutError'));
   assert.ok(UI_HTML.includes('data-setting-card="notifyCdpRestart"'));
+});
+
+test('sidebar shows distinct repair outcomes and reserves the admin hint for permission errors', async () => {
+  const { dictionaries } = createPresentation();
+  for (const language of ['en', 'zh-CN', 'zh-TW']) {
+    assert.ok(dictionaries[language].cdpFixShortcutPartial, language);
+  }
+  const dict = dictionaries['zh-CN'];
+  const start = UI_HTML.indexOf('    let fixingShortcut = false;');
+  const end = UI_HTML.indexOf('    function renderHealthNotice()', start);
+  assert.ok(start >= 0 && end > start);
+  const context = createContext({
+    document: { getElementById: () => ({ addEventListener: (event, fn) => { context.click = fn; } }) },
+    postApi: async () => ({ json: async () => context.result }),
+    lastData: { deckCdpInfo: { shortcutState: 'missing', canFixShortcut: true } },
+    renderHealthNotice() {},
+  });
+  runInContext(UI_HTML.slice(start, end), context);
+  context.result = { ok: false, reason: 'partial', shortcutState: 'unknown' };
+  await context.click();
+  assert.equal(dict[runInContext('shortcutFixMessageKey', context)], dict.cdpFixShortcutPartial);
+  assert.equal(context.lastData.deckCdpInfo.canFixShortcut, false);
+  context.result = { ok: false, reason: 'error', shortcutState: 'missing' };
+  await context.click();
+  assert.equal(dict[runInContext('shortcutFixMessageKey', context)], dict.cdpFixShortcutError);
+
+  for (const [result, expected] of [
+    [{ ok: false, reason: 'permission' }, dict.cdpFixShortcutAdmin],
+    [{ ok: false, reason: 'unsupported' }, dict.cdpFixShortcutError],
+    [{ error: 'Unexpected response' }, dict.cdpFixShortcutError],
+  ]) {
+    context.result = result;
+    await context.click();
+    assert.equal(dict[runInContext('shortcutFixMessageKey', context)], expected);
+  }
 });
 
 test('cdp_notice distinguishes first-time vs post-update restart, notifies once per session, and supports shortcut repair', async t => {
@@ -73,7 +111,7 @@ test('cdp_notice distinguishes first-time vs post-update restart, notifies once 
     const cmd = args.join(' ');
     calls.push({ file, cmd, env: opts?.env });
     if (cmd.includes('ShowBalloonTip')) return cb(null, '');
-    if (cmd.includes('$stillMissing')) return cb(null, fixResult);
+    if (cmd.includes('$l.Save()')) return cb(null, fixResult);
     return cb(null, scanResult);
   };
 
