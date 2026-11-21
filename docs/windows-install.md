@@ -93,7 +93,7 @@
 - **手动设置**：在快捷方式「属性 → 目标」末尾加上 ` --remote-debugging-port=0`。
 - **没有可用的快捷方式**：如果一个快捷方式都没找到，或者只有改不了的公共快捷方式，先给自己建一个：找到 `Antigravity.exe`（通常在 `%LOCALAPPDATA%\Programs\antigravity`），右键选「发送到 → 桌面快捷方式」（Windows 11 先点「显示更多选项」），再按上面的手动设置给它加参数。完全退出 Antigravity 后用这个新快捷方式打开。
 
-改完后要**完全退出** Antigravity 再从快捷方式打开。以下启动方式不经过快捷方式，不会带上参数：点 `antigravity://` 链接或在资源管理器里「用 Antigravity 打开」时恰好没有窗口在运行；Antigravity 自动更新后自行重启；更新安装器重建了快捷方式（需要再运行一次脚本）。
+改完后要**完全退出** Antigravity 再从快捷方式打开。没有窗口在运行时，点 `antigravity://` 链接或在资源管理器里「用 Antigravity 打开」会绕过快捷方式，不会带上参数。自动更新后，Antigravity 可能沿用带 `--remote-debugging-port=0` 的开始菜单快捷方式。只有重启没带参数时，底栏胶囊才会因调试端口未开启而消失。如果更新重建了快捷方式并清除了参数，先再运行一次脚本补回参数，然后完全退出并从快捷方式重新打开。
 
 ### 遇到问题
 
@@ -198,7 +198,7 @@ The footer capsule attaches under the input box through Antigravity's debugging 
 - **By hand**: add ` --remote-debugging-port=0` to the end of the shortcut's **Properties → Target**.
 - **No usable shortcut**: if no shortcut was found, or only all-users shortcuts you can't change, create your own: find `Antigravity.exe` (usually in `%LOCALAPPDATA%\Programs\antigravity`), right-click it and choose **Send to → Desktop (create shortcut)** (on Windows 11, click **Show more options** first), then add the switch to it by hand as above. Quit Antigravity completely and open it from the new shortcut.
 
-Afterwards, **quit Antigravity completely** and open it from a shortcut. These launches skip the shortcut and won't carry the switch: an `antigravity://` link or Explorer's "Open with Antigravity" when no Antigravity window is open; Antigravity restarting itself after an auto-update; an update installer recreating the shortcuts (run the script again).
+Afterwards, **quit Antigravity completely** and open it from a shortcut. Opening an `antigravity://` link or using Explorer's "Open with Antigravity" when no Antigravity window is open bypasses the shortcut and omits the flag. After an automatic update, Antigravity may restart from its existing Start menu shortcut with `--remote-debugging-port=0`. Only a restart without the flag will leave the debug port closed and the footer capsule missing. If the update recreated the shortcut and removed the flag, run the script again to restore it, then quit Antigravity completely and reopen it from the shortcut.
 
 ### Troubleshooting
 

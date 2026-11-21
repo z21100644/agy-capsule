@@ -1,3 +1,5 @@
+import { effortEffects, mountEffortBar } from './effort_bar.mjs';
+
 // The desktop host owns the options and the selection. Re-read both from the
 // current button before writing; a retained composer may belong to another chat.
 export function resolveInheritedLabel(groupItems, selectedLabel) {
@@ -150,11 +152,12 @@ export function readPickerState(trigger) {
   };
 }
 
-export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooterLeft) {
+export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooterLeft, settingsLabels = labels) {
   const enabled = typeof prefsOrEnabled === 'boolean' ? prefsOrEnabled : prefsOrEnabled?.modelEffortPicker === true;
-  const keepNative = typeof prefsOrEnabled === 'object' ? prefsOrEnabled?.keepNativeModelEntry !== false : true;
   const hideTags = typeof prefsOrEnabled === 'object' ? prefsOrEnabled?.hideModelTags === true : false;
   const hideDefaultEffort = typeof prefsOrEnabled === 'object' ? prefsOrEnabled?.hideDefaultEffort === true : false;
+  const effortCaption = prefsOrEnabled?.showEffortBar === true ? (labels?.effortLevel || 'Effort level') : '';
+  const effortOptions = effortCaption ? settingsLabels?.effortBarOptions : null;
   const customizeList = typeof prefsOrEnabled === 'object' ? prefsOrEnabled?.customizeModelList === true : false;
   const hiddenList = customizeList && Array.isArray(prefsOrEnabled?.hiddenModels) ? prefsOrEnabled.hiddenModels : [];
   const previous = root._modelPicker;
@@ -174,7 +177,7 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
     (document.documentElement.lang.startsWith('zh') ? '尚未确认切换，请查看原生菜单。' : 'Selection unconfirmed. Check the native menu.');
 
   if (root._modelPicker) {
-    root._modelPicker.setConfig(keepNative, hiddenList, hideTags, hideDefaultEffort);
+    root._modelPicker.setConfig(hiddenList, hideTags, hideDefaultEffort, effortCaption, effortOptions);
     root._modelPicker.refresh(state, resolveCaption(labels), resolveUnconfirmed(labels));
     return;
   }
@@ -230,12 +233,17 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
   };
 
   let signature, pending = null, expiry;
+  let queuedEffort = null;
   let currentCaption = resolveCaption(labels);
   let currentUnconfirmed = resolveUnconfirmed(labels);
-  let currentKeepNative = keepNative;
   let currentHidden = [...hiddenList];
   let currentHideTags = hideTags;
   let currentHideDefaultEffort = hideDefaultEffort;
+  let currentEffortCaption = effortCaption;
+  let currentEffortOptions = effortOptions;
+  let currentEffortLabels = [];
+  const rememberedEffort = new Map();
+  let effortBar = null;
   let renderedGroups = new Map();
   let currentSelected = state.selected;
   let openSubRow = null;
@@ -277,7 +285,7 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
   };
   const showSubFor = (row, group) => {
     cancelHideSub();
-    if (!panel.matches(':popover-open') || !group?.isMultiTier) { hideSub(); return; }
+    if (currentEffortCaption || !panel.matches(':popover-open') || !group?.isMultiTier) { hideSub(); return; }
     if (openSubRow && openSubRow !== row) openSubRow.removeAttribute('data-sub-open');
     openSubRow = row;
     row.setAttribute('data-sub-open', 'true');
@@ -321,13 +329,12 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
       root.style.marginLeft = '6px';
       return;
     }
-    const mode = currentKeepNative ? 'bubble' : 'hidden';
-    if (trigger.getAttribute('data-deck-model-bubble') !== mode) {
-      trigger.setAttribute('data-deck-model-bubble', mode);
+    if (trigger.getAttribute('data-deck-model-bubble') !== 'hidden') {
+      trigger.setAttribute('data-deck-model-bubble', 'hidden');
     }
     // A replaced native button leaves its 0-width wrapper at the exact spot; drop the
     // strip's own left margin so the capsule starts where the native one did.
-    root.style.marginLeft = mode === 'hidden' ? '0px' : '6px';
+    root.style.marginLeft = '0px';
   };
   const close = () => {
     hideTip();
@@ -337,15 +344,29 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
   const isCurrent = () => findFooterLeft() === footer && trigger.isConnected &&
     footer.querySelector('button[data-testid="model-selector-trigger"]') === trigger;
 
+  const tintEffort = (node, group, label) => {
+    if (!node) return;
+    let color = '';
+    if (currentEffortCaption && group?.isMultiTier) {
+      const idx = group.items.findIndex(item => item.label === label);
+      if (idx >= 0) color = effortEffects().valueColorFor(group.items[idx].tier, idx, group.items.length,
+        idx === group.items.length - 1, group.items[0].tier.toLowerCase() === 'off', false);
+    }
+    node.style.color = color;
+    node.style.opacity = color ? '1' : '';
+    node.style.fontWeight = color ? '600' : '';
+  };
+
   applyNativeMode(true);
 
   const picker = {
     trigger, id: state.conversationId,
-    setConfig(nextKeep, nextHidden, nextHideTags = false, nextHideDefaultEffort = false) {
-      currentKeepNative = nextKeep;
+    setConfig(nextHidden, nextHideTags = false, nextHideDefaultEffort = false, nextEffortCaption = '', effortSettings = null) {
       currentHidden = Array.isArray(nextHidden) ? [...nextHidden] : [];
       currentHideTags = nextHideTags === true;
       currentHideDefaultEffort = nextHideDefaultEffort === true;
+      currentEffortCaption = nextEffortCaption;
+      currentEffortOptions = effortSettings;
       if (trigger.hasAttribute('data-deck-model-bubble')) applyNativeMode(true);
     },
     setBubble(active) {
@@ -360,6 +381,7 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
     dispose() {
       clearTimeout(expiry);
       close();
+      effortBar?.setOpen(false);
       button.remove();
       panel.remove();
       trigger.removeAttribute('data-deck-model-bubble');
@@ -381,9 +403,12 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
         clearTimeout(expiry);
         pending = null;
         status.textContent = '';
-        close();
+        if (!currentEffortCaption) close();
+        const queued = queuedEffort;
+        queuedEffort = null;
+        if (queued && queued !== next.selected) queueMicrotask(() => void commitSelection(queued, true));
       }
-      const key = JSON.stringify([next.items || next.labels, next.selected, pending, currentHidden, currentHideTags, currentHideDefaultEffort]);
+      const key = JSON.stringify([next.items || next.labels, next.selected, pending, currentHidden, currentHideTags, currentHideDefaultEffort, currentEffortCaption, currentEffortOptions?.title]);
       if (key === signature) return;
       signature = key;
       hideSub();
@@ -415,6 +440,34 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
         }
       }
 
+      const effortGroup = currentEffortCaption && groups.find(group => group.items.some(item => item.label === next.selected));
+      if (effortGroup?.isMultiTier) rememberedEffort.set(effortGroup.name, next.selected);
+      tintEffort(button.querySelector('.dk-mp-effort'), effortGroup, next.selected);
+      currentEffortLabels = effortGroup ? effortGroup.items.map(item => item.label) : [];
+      panel.dataset.effortMode = String(!!currentEffortCaption);
+      panel.setAttribute('role', currentEffortCaption ? 'dialog' : 'menu');
+      if (currentEffortCaption) {
+        button.setAttribute('aria-haspopup', 'dialog');
+        options.setAttribute('role', 'menu');
+        options.setAttribute('aria-label', currentCaption);
+      } else {
+        button.removeAttribute('aria-haspopup');
+        options.removeAttribute('role');
+        options.removeAttribute('aria-label');
+      }
+      if (effortGroup) {
+        if (!effortBar) {
+          effortBar = mountEffortBar(label => void commitSelection(label, true));
+          options.after(effortBar.element);
+        }
+        effortBar.refresh(effortGroup, next.selected, pending, currentEffortCaption, currentEffortOptions);
+        effortBar.setOpen(panel.matches(':popover-open'));
+      } else if (effortBar) {
+        effortBar.setOpen(false);
+        effortBar.element.remove();
+        effortBar = null;
+      }
+
       const hiddenSet = new Set(currentHidden);
       const filtered = groups.filter(group => !hiddenSet.has(group.familyName));
       const visibleGroups = filtered.length > 0 ? filtered : groups;
@@ -437,6 +490,7 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
       };
 
       renderedGroups = new Map();
+      const focusedFamily = currentEffortCaption && options.getRootNode().activeElement?.closest('button.dk-model-row')?.dataset.family;
       options.replaceChildren();
       for (const group of visibleGroups) {
         renderedGroups.set(group.familyName, group);
@@ -461,15 +515,17 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
         row.className = 'dk-model-row';
         row.setAttribute('role', 'menuitem');
         const isActiveGroup = group.items.some(item => item.label === next.selected);
-        const targetLabel = group.isMultiTier
+        const targetLabel = !group.isMultiTier ? group.items[0].label : !currentEffortCaption
           ? resolveInheritedLabel(group.items, next.selected)
-          : group.items[0].label;
+          : (group.items.find(item => item.label === rememberedEffort.get(group.name))
+            || group.items.find(item => item.tier.toLowerCase() === 'medium') || group.items[0]).label;
         row.dataset.label = targetLabel;
         row.dataset.family = group.familyName;
         row.setAttribute('aria-label', targetLabel);
         row.setAttribute('aria-pressed', String(isActiveGroup));
-        if (group.isMultiTier) row.setAttribute('aria-haspopup', 'menu');
-        row.disabled = pending !== null;
+        if (group.isMultiTier && !currentEffortCaption) row.setAttribute('aria-haspopup', 'menu');
+        if (currentEffortCaption) row.setAttribute('aria-disabled', String(pending !== null));
+        else row.disabled = pending !== null;
 
         const main = document.createElement('span');
         main.className = 'dk-model-main';
@@ -491,6 +547,7 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
             const eff = document.createElement('span');
             eff.className = 'dk-mp-effort';
             eff.textContent = displayTier;
+            tintEffort(eff, group, targetLabel);
             main.append(eff);
           }
         }
@@ -500,28 +557,36 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
         const end = document.createElement('span');
         end.className = 'dk-mp-end';
         if (isActiveGroup) end.innerHTML = SVG_CHECK;
-        else if (group.isMultiTier) end.innerHTML = SVG_CHEV;
+        else if (group.isMultiTier && !currentEffortCaption) end.innerHTML = SVG_CHEV;
         row.append(main, end);
         options.append(row);
+        if (group.familyName === focusedFamily) row.focus({ preventScroll: true });
       }
     },
   };
   root._modelPicker = picker;
 
-  const commitSelection = async label => {
-    if (!label || pending || !isCurrent()) return;
+  const commitSelection = async (label, fromEffort = false) => {
+    if (!label || !isCurrent()) return;
+    if (fromEffort && (!currentEffortCaption || !currentEffortLabels.includes(label))) return;
+    if (pending) {
+      // Do not submit stale options concurrently: keep the newest detent in a fast drag.
+      if (fromEffort && currentEffortLabels.includes(pending)) queuedEffort = label === pending ? null : label;
+      return;
+    }
     const current = read();
     if (!current || current.conversationId !== picker.id || !current.labels.includes(label)) {
       picker.dispose();
       return;
     }
-    if (label === current.selected) { close(); return; }
+    if (label === current.selected) { if (!currentEffortCaption) close(); return; }
     pending = label;
     status.textContent = '';
     picker.refresh(current, currentCaption, currentUnconfirmed);
     const fail = () => {
       if (root._modelPicker !== picker || pending !== label) return;
       pending = null;
+      queuedEffort = null;
       status.textContent = currentUnconfirmed;
       const next = read();
       if (next && next.conversationId === picker.id) picker.refresh(next, currentCaption, currentUnconfirmed);
@@ -542,7 +607,7 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
   };
 
   panel.addEventListener('beforetoggle', event => {
-    if (event.newState !== 'open') { hideTip(); hideSub(); return; }
+    if (event.newState !== 'open') { hideTip(); hideSub(); effortBar?.setOpen(false); return; }
     picker.sync();
     if (root._modelPicker !== picker) return;
     const rect = button.getBoundingClientRect();
@@ -550,6 +615,7 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
     panel.style.left = Math.max(6, Math.min(rect.left, innerWidth - estWidth - 6)) + 'px';
     panel.style.bottom = Math.max(6, innerHeight - rect.top + 6) + 'px';
     panel.style.maxHeight = Math.max(48, rect.top - 12) + 'px';
+    effortBar?.setOpen(true);
   });
   panel.addEventListener('toggle', event => {
     if (event.newState !== 'open') { hideTip(); hideSub(); }

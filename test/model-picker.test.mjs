@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readPickerState, resolveInheritedLabel } from '../agy-capsule/sidecars/agy_capsule/model_picker.mjs';
 import { DEFAULT_SETTINGS, normalizeSettings } from '../agy-capsule/sidecars/agy_capsule/settings.mjs';
+import { UI_HTML } from '../agy-capsule/sidecars/agy_capsule/server.mjs';
+import { createPresentation } from '../agy-capsule/sidecars/agy_capsule/ui.mjs';
 
 function host(id) {
   const current = { label: 'First (Low)' };
@@ -91,23 +93,40 @@ test('direct-click effort inheritance follows current tier and downgrades XHigh/
   assert.equal(resolveInheritedLabel(argon, 'Gemini 4 Argon (Low)'), 'Gemini 4 Argon (Low)');
 });
 
-test('keepNativeModelEntry, hideModelTags, hideDefaultEffort, customizeModelList and hiddenModels settings validate and normalize cleanly', () => {
-  assert.equal(DEFAULT_SETTINGS.keepNativeModelEntry, true);
+test('hideModelTags, hideDefaultEffort, customizeModelList and hiddenModels settings validate and normalize cleanly', () => {
   assert.equal(DEFAULT_SETTINGS.hideModelTags, false);
   assert.equal(DEFAULT_SETTINGS.hideDefaultEffort, false);
   assert.equal(DEFAULT_SETTINGS.customizeModelList, false);
   assert.deepEqual(DEFAULT_SETTINGS.hiddenModels, []);
   const normalized = normalizeSettings({
     modelEffortPicker: true,
-    keepNativeModelEntry: false,
     hideModelTags: true,
     hideDefaultEffort: true,
     customizeModelList: true,
     hiddenModels: ['Gemini 3.8 Flash', ' ', 'Gemini 3.8 Flash', 42, 'GPT-OSS 120B (Medium)'],
   });
-  assert.equal(normalized.keepNativeModelEntry, false);
   assert.equal(normalized.hideModelTags, true);
   assert.equal(normalized.hideDefaultEffort, true);
   assert.equal(normalized.customizeModelList, true);
   assert.deepEqual(normalized.hiddenModels, ['Gemini 3.8 Flash', 'GPT-OSS 120B (Medium)']);
+});
+
+test('model picker settings card uses responsive grid, default-off expand toggle, and unified row preview', () => {
+  const { dictionaries } = createPresentation();
+  assert.equal(dictionaries['zh-CN'].expandModelList, '展开列表');
+  assert.equal(dictionaries['zh-TW'].expandModelList, '展開清單');
+  assert.equal(dictionaries.en.expandModelList, 'Expand list');
+
+  assert.match(UI_HTML, /@container model-card/);
+  assert.match(UI_HTML, /id="setting-expand-model-list"[^>]*data-ui-toggle="expandModelList"/);
+  assert.doesNotMatch(UI_HTML, /id="setting-expand-model-list"[^>]*\bchecked\b/);
+  assert.match(UI_HTML, /data-hide-model-tags=/);
+  assert.match(UI_HTML, /data-hide-default-effort=/);
+  assert.match(UI_HTML, /class="pv-mp-row"/);
+  assert.match(UI_HTML, /class="pv-mp-row-effort"/);
+  assert.match(UI_HTML, /class="pv-mp-row-tag"/);
+  assert.match(UI_HTML, /prefs\.modelEffortPicker === true && prefs\.customizeModelList === true && expandModelList === true/);
+  assert.match(UI_HTML, /\.pv-model-list\s*\{\s*display:\s*flex;\s*flex-wrap:\s*wrap;/);
+  assert.match(UI_HTML, /function formatModelListName\(name\)/);
+  assert.match(UI_HTML, /\(\?:Gemini\|Claude\)\\s\+/);
 });

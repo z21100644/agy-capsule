@@ -40,6 +40,8 @@ test('CDP installs code once, skips unchanged payloads, updates on navigation, a
   let now = owner, installed = false, path = '/', pageExists = true, hasFooter = true, inspections = 0, injections = 0, pushes = 0, lists = 0, next = { contextTokens: 100 };
   let allowInstall = true, allowApply = true;
   let modelStates = {};
+  const mainReads = [], childReads = [], childPushes = [];
+  let childData = null;
   const connections = [];
   const origin = 'https://127.0.0.1:5351';
   const emitContext = (socket, origin, uniqueId) => socket.onmessage({ data: JSON.stringify({
@@ -59,6 +61,7 @@ test('CDP installs code once, skips unchanged payloads, updates on navigation, a
       if (expression.includes('function installRuntime')) { injections++; installed = allowInstall; value = installed; }
       else if (expression.includes('.readState(')) value = installed ? { owner, hash, path, hasFooter, ...modelStates[this.id] } : null;
       else if (expression.includes('.apply(')) { pushes++; value = allowApply; }
+      else if (expression.includes('.applySubagent(')) { childPushes.push(expression); value = true; }
       queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ id, result: { result: { value } } }) }));
     }
     close() { if (this.readyState === 3) return; this.readyState = 3; queueMicrotask(() => this.onclose?.()); }
@@ -76,7 +79,9 @@ test('CDP installs code once, skips unchanged payloads, updates on navigation, a
   let injector;
   try {
     let navigateWhileReading = false;
-    injector = startDeckInjector(async () => {
+    injector = startDeckInjector(async (...args) => {
+      if (args[2]) { childReads.push(args); return childData; }
+      mainReads.push(args);
       inspections++;
       if (inspectFails) throw new Error('data unavailable');
       if (navigateWhileReading) emitContext(connections[0], 'https://127.0.0.1:7777', 'preview-document');
@@ -148,6 +153,26 @@ test('CDP installs code once, skips unchanged payloads, updates on navigation, a
     await injector.tick();
     assert.deepEqual(injector.models(second), [], 'ignore a retained selector from a different conversation');
     assert.deepEqual(injector.models(first), ['Argon']);
+
+    modelStates.page.path = '/';
+    modelStates.page.conversationId = first;
+    await injector.tick();
+    assert.deepEqual(mainReads.at(-2), [first, true], 'request main data for the displayed ID even without a /c/ route');
+    assert.deepEqual(injector.models(first), ['Argon']);
+    modelStates.page.subagentIds = [second];
+    const beforeChild = pushes;
+    childData = { subagent: { model: 'Worker' } };
+    await injector.tick();
+    assert.deepEqual(childReads.at(-1), [second, true, true], 'read the child without changing the main scope');
+    assert.equal(pushes, beforeChild, 'the parent did not need a new payload');
+    assert.equal(childPushes.length, 1);
+    assert.match(childPushes[0], /Worker.*22222222/);
+    modelStates.page.loadedSubagentIds = [second];
+    await injector.tick();
+    assert.equal(childPushes.length, 1, 'unchanged installed child data is not resent');
+    childData = null;
+    await injector.tick();
+    assert.match(childPushes.at(-1), /applySubagent\(null,/, 'clear data that is no longer verifiable');
     pageExists = false; now += 5000; await injector.tick();
     assert.deepEqual(injector.models(first), [], 'closed composers do not leave a stale model list');
   } finally {

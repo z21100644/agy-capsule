@@ -3,7 +3,8 @@ import { statSync } from 'node:fs';
 export function fileStamp(path) {
   try {
     const s = statSync(path, { bigint: true });
-    return { size: s.size, key: `${s.ino}:${s.size}:${s.mtimeNs}` };
+    if (!s.isFile()) return null;
+    return { size: s.size, mtimeMs: Number(s.mtimeNs / 1_000_000n), key: `${s.ino}:${s.size}:${s.mtimeNs}` };
   } catch {
     return null;
   }

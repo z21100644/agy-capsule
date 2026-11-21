@@ -33,7 +33,9 @@ const openSidebar = async data => {
 test('the footer strip is repainted only when what it shows or where it sits changed', () => {
   const owner = 1234;
   const dom = createStubDom();
-  const footer = dom.element(), footerLeft = dom.element(), controls = dom.element();
+  const view = dom.element(), footer = dom.element(), footerLeft = dom.element(), controls = dom.element();
+  view.setAttribute('data-testid', 'conversation-view');
+  view.appendChild(footer);
   footer.appendChild(footerLeft);
   footer.appendChild(controls);
   dom.footers = [footerLeft];
@@ -139,7 +141,7 @@ test('statistics behind the settings tab are not refreshed and catch up when it 
   assert.equal(dom.document.getElementById('cdp-notice').hidden, false, 'the notice shown on both tabs stays live');
   assert.deepEqual(
     dom.document.getElementById('setting-model-list').children.map(node => node.textContent),
-    ['Gemini 4 Argon', 'Claude'],
+    ['4 Argon', 'Claude'],
     'the model list on the settings tab still populates as models arrive'
   );
 
@@ -150,7 +152,9 @@ test('statistics behind the settings tab are not refreshed and catch up when it 
 test('the enhanced model capsule reacts to late trigger hydration and host model changes without idle repaints', () => {
   const owner = 1234;
   const dom = createStubDom();
-  const footer = dom.element(), footerLeft = dom.element(), controls = dom.element();
+  const view = dom.element(), footer = dom.element(), footerLeft = dom.element(), controls = dom.element();
+  view.setAttribute('data-testid', 'conversation-view');
+  view.appendChild(footer);
   const trigger = dom.element('button');
   trigger.setAttribute('data-testid', 'model-selector-trigger');
   footerLeft.appendChild(trigger);

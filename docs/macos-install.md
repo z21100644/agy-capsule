@@ -128,7 +128,7 @@ osacompile -o /Applications/Antigravity-CDP.app -e 'do shell script "open -a Ant
 ### 注意事项
 
 - **程序坞出现两个图标是正常的**：新图标只负责带参数拉起真正的 Antigravity，拉起后自己就退出了，运行中的仍然是原版图标。建议把原来常驻程序坞的图标移除，以后只点新图标，免得点错。
-- **不经过新图标的启动不会带参数**：例如没有 Antigravity 窗口运行时点 `antigravity://` 链接，从访达「打开方式」冷启动，或者 Antigravity 自动更新后自行重启。底栏胶囊消失时，按 `Cmd + Q` 彻底退出，再用新图标打开一次即可，不需要更新插件。
+- **不经过新图标的启动不会带参数**：例如没有 Antigravity 窗口运行时点 `antigravity://` 链接，或从访达「打开方式」冷启动。如果 Antigravity 自动更新后重启没带参数，底栏胶囊也不会加载。底栏胶囊消失时，按 `Cmd + Q` 彻底退出，再用新图标打开一次即可，不需要更新插件。
 - **不要修改 `Antigravity.app` 内部的文件**：会破坏应用签名，导致应用无法打开，而且更新后也会被还原。
 - **安全说明**：调试端口只监听本机。用 `--remote-debugging-port=0` 时，系统会自动分配一个空闲的本机端口，不会占用固定端口。端口打开期间，本机上的其他程序也可以通过它控制 Antigravity 窗口，请只在你信任的个人电脑上使用。
 
@@ -260,6 +260,6 @@ An `Antigravity-CDP` app appears in your Applications folder.
 ### Notes
 
 - **Seeing a second Antigravity icon in the Dock is normal**: the launcher only starts Antigravity with the flag and then exits, leaving the real Antigravity icon running. You can remove the original pinned icon from the Dock so you don't click it by mistake.
-- **Launches that bypass the launcher won't carry the flag**: opening an `antigravity://` link or using Finder's "Open With" when no window is running, or Antigravity restarting itself after an auto-update. If the capsule disappears, press `Cmd + Q` and reopen via the launcher. No plugin update is needed.
+- **Launches that bypass the launcher won't carry the flag**: for example, opening an `antigravity://` link or using Finder's "Open With" when no window is running. If Antigravity restarts without the flag after an automatic update, the footer capsule won't load either. If the capsule disappears, press `Cmd + Q` and reopen via the launcher. No plugin update is needed.
 - **Don't edit files inside `Antigravity.app`**: doing so breaks its code signature so the app won't open, and updates overwrite the changes anyway.
 - **Security**: the debugging port listens on localhost only. With `--remote-debugging-port=0` the OS picks a free local port, so no fixed port is taken. While it's open, other programs on this computer can also control Antigravity windows; use it only on a computer you trust.

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createSettingsStore, DEFAULT_SETTINGS } from '../agy-capsule/sidecars/agy_capsule/settings.mjs';
@@ -73,21 +73,26 @@ test('individual settings validate values, persist and propagate between sidecar
   }
 });
 
-test('a same-size atomic replacement that keeps its mtime is still detected', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'agy-settings-stamp-'));
+test('settings cache detects an atomic replacement with the same size and modification time', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agy-settings-replace-'));
   try {
     const file = join(dir, 'settings.json');
-    const when = new Date(1700000000000);
-    const replace = labelCase => {
-      writeFileSync(file + '.next', JSON.stringify({ labelCase }));
-      utimesSync(file + '.next', when, when);
-      renameSync(file + '.next', file);
-    };
-    replace('lowercase');
+    const replacement = join(dir, 'replacement.json');
+    const timestamp = 1_700_000_000;
+    writeFileSync(file, JSON.stringify({ cacheWarnMin: 2 }));
+    utimesSync(file, timestamp, timestamp);
+    const before = statSync(file, { bigint: true });
     const store = createSettingsStore(file);
-    assert.equal(store.read().labelCase, 'lowercase');
-    replace('titlecase');
-    assert.equal(store.read().labelCase, 'titlecase');
+    assert.equal(store.read().cacheWarnMin, 2);
+
+    writeFileSync(replacement, JSON.stringify({ cacheWarnMin: 3 }));
+    utimesSync(replacement, timestamp, timestamp);
+    renameSync(replacement, file);
+    const after = statSync(file, { bigint: true });
+    assert.equal(after.size, before.size);
+    assert.equal(after.mtimeNs, before.mtimeNs);
+    assert.notEqual(after.ino, before.ino);
+    assert.equal(store.read().cacheWarnMin, 3);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -240,10 +245,10 @@ test('sidebar settings use flat dividers, same-row appearance blocks, refined ca
   );
   assert.ok(!UI_HTML.includes('data-settings-scope="quota"') && !UI_HTML.includes('data-settings-scope="context"'));
   assert.ok(!UI_HTML.includes('data-settings-scope="request"') && !UI_HTML.includes('data-settings-scope="turn"'));
-  assert.ok(UI_HTML.includes('id="help-language-scope"') && UI_HTML.includes('id="help-notify-cdp-restart"') && UI_HTML.includes('id="help-speed-pair"') && UI_HTML.includes('id="help-request-metrics"') && UI_HTML.includes('id="help-turn-metrics"'));
+  assert.ok(UI_HTML.includes('id="help-language-scope"') && UI_HTML.includes('id="help-notify-cdp-restart"') && UI_HTML.includes('id="help-speed-pair"') && UI_HTML.includes('id="help-request-metrics"') && UI_HTML.includes('id="help-turn-metrics"') && UI_HTML.includes('id="help-usage-scope"'));
   assert.ok(!UI_HTML.includes('class="settings-note"'));
   assert.match(settingsHtml, /data-setting-card="language"[\s\S]*?class="setting-help-dot"[\s\S]*?id="help-language-scope"[^>]*data-i18n="languageScopeNote"/);
-  assert.equal((settingsHtml.match(/class="setting-help-dot"/g) || []).length, 5, 'only 5 concise ? help dots should remain');
+  assert.equal((settingsHtml.match(/class="setting-help-dot"/g) || []).length, 7, 'only 7 concise ? help dots should remain');
   assert.ok(UI_HTML.includes('data-preview-group="turn"') && !UI_HTML.includes('data-preview-group="request"'));
   assert.equal(ui.dictionaries.en.showRequestMetrics, 'Last request');
   assert.equal(ui.dictionaries.en.turnMetrics, 'Last turn');
@@ -534,7 +539,7 @@ test('the frosted skin is opt-in, changes only the panel material and never asks
 
 test('help dots, disabled option controls, turn preview short labels, and convId validation stay consistent', async () => {
   const settingsHtml = UI_HTML.slice(UI_HTML.indexOf('<section class="settings'));
-  assert.equal((settingsHtml.match(/<span class="setting-help-dot" aria-hidden="true">\?<\/span>/g) || []).length, 5);
+  assert.equal((settingsHtml.match(/<span class="setting-help-dot" aria-hidden="true">\?<\/span>/g) || []).length, 7);
   assert.doesNotMatch(settingsHtml, /<button[^>]*setting-help-dot/);
   assert.doesNotMatch(UI_HTML, /\.setting-help-dot\s*\{[^}]*margin-left:\s*auto/);
   assert.match(UI_HTML, /\.metric-setting > \.setting-head \{ justify-content: flex-start; \}/);

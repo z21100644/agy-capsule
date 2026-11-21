@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'no
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-export const DEFAULT_SETTINGS = Object.freeze({ language: 'en', settingsLanguage: 'zh-CN', uiSkin: 'native', panelLayout: 'natural', density: 'compact', quotaIndicator: 'ring', cacheIndicator: 'icon', cacheHitFormat: 'percent', labelCase: 'lowercase', resetFormat: 'compact', popAnimation: false, contextLayout: 'columns', turnLayout: 'columns', contextMarker: 'square', turnMarker: 'square', showContextBreakdown: true, columnLabel: true, columnValue: true, columnPercent: false, columnOrder: 'label,value,percent', highlightContextHover: false, highlightActiveModel: false, modelEffortPicker: false, keepNativeModelEntry: true, hideModelTags: false, hideDefaultEffort: false, customizeModelList: false, hiddenModels: Object.freeze([]), hideUnavailableQuota: true, showQuotaDividers: true, showCacheWarnings: true, cacheWarnMin: 3, cacheColdMin: 4, showContextWarnings: true, showRequestErrors: true, notifyCdpRestart: true, showSpeed: true, speedAnimation: false, showRequestMetrics: true, compactTelemetryBar: false, telemetryBarPosition: 'bottom', showTurnMetrics: false, showUsageActivity: false, showModelUsage: false, showQueueWarnings: true, queueWarnSec: 30 });
+export const DEFAULT_SETTINGS = Object.freeze({ language: 'en', settingsLanguage: 'zh-CN', uiSkin: 'native', panelLayout: 'natural', density: 'compact', quotaIndicator: 'ring', cacheIndicator: 'icon', cacheHitFormat: 'percent', labelCase: 'lowercase', resetFormat: 'compact', popAnimation: false, contextLayout: 'columns', turnLayout: 'columns', contextMarker: 'square', turnMarker: 'square', showContextBreakdown: true, columnLabel: true, columnValue: true, columnPercent: false, columnOrder: 'label,value,percent', highlightContextHover: false, highlightActiveModel: false, modelEffortPicker: false, showEffortBar: false, hideModelTags: false, hideDefaultEffort: false, customizeModelList: false, hiddenModels: Object.freeze([]), hideUnavailableQuota: true, showQuotaDividers: true, showCacheWarnings: true, cacheWarnMin: 3, cacheColdMin: 4, showContextWarnings: true, showRequestErrors: true, notifyCdpRestart: true, notifyUpdates: true, showSpeed: true, speedAnimation: false, showRequestMetrics: true, compactTelemetryBar: false, telemetryBarPosition: 'bottom', showTurnMetrics: false, showQueueWarnings: true, queueWarnSec: 30, showUsageActivity: false, showModelUsage: false });
 const choices = {
   language: ['en', 'zh-CN', 'zh-TW'],
   settingsLanguage: ['en', 'zh-CN', 'zh-TW'],
@@ -26,7 +26,7 @@ const choices = {
   columnOrder: ['label,value,percent', 'label,percent,value', 'value,label,percent', 'value,percent,label', 'percent,label,value', 'percent,value,label'],
   highlightContextHover: [true, false],
   modelEffortPicker: [true, false],
-  keepNativeModelEntry: [true, false],
+  showEffortBar: [true, false],
   hideModelTags: [true, false],
   hideDefaultEffort: [true, false],
   customizeModelList: [true, false],
@@ -37,15 +37,16 @@ const choices = {
   showContextWarnings: [true, false],
   showRequestErrors: [true, false],
   notifyCdpRestart: [true, false],
+  notifyUpdates: [true, false],
   showSpeed: [true, false],
   speedAnimation: [true, false],
   showRequestMetrics: [true, false],
   compactTelemetryBar: [true, false],
   telemetryBarPosition: ['bottom', 'top'],
   showTurnMetrics: [true, false],
+  showQueueWarnings: [true, false],
   showUsageActivity: [true, false],
   showModelUsage: [true, false],
-  showQueueWarnings: [true, false],
 };
 const numericRanges = {
   cacheWarnMin: [1, 998],
@@ -92,7 +93,7 @@ export function createSettingsStore(filePath = join(homedir(), '.gemini', 'confi
     try {
       // An atomic replacement can keep both size and a coarse mtime; its inode still changes.
       const stat = statSync(filePath, { bigint: true });
-      const key = `${stat.ino}:${stat.mtimeNs}:${stat.size}`;
+      const key = `${stat.ino}:${stat.size}:${stat.mtimeNs}`;
       if (key !== lastStat) {
         const raw = JSON.parse(readFileSync(filePath, 'utf8'));
         cached = normalizeSettings(raw);

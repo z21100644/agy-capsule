@@ -86,7 +86,7 @@ test('protected data and host operations are registered only as POST; legacy GET
   assert.equal(get.status, 405);
   assert.deepEqual(Object.keys(JSON.parse(get.body)), ['uiVersion']);
   assert.deepEqual([...routes.keys()].filter(k => k.startsWith('GET ')), ['GET /api/context']);
-  for (const path of ['/api/context', '/api/settings', '/api/fix-cdp-shortcut', '/_sidecar/new-conversation', '/_sidecar/send-message', '/_sidecar/get-conversation-metadata']) {
+  for (const path of ['/api/context', '/api/settings', '/api/version', '/api/update', '/api/fix-cdp-shortcut', '/_sidecar/new-conversation', '/_sidecar/send-message', '/_sidecar/get-conversation-metadata']) {
     assert.ok(routes.has('POST ' + path), path);
   }
 });

@@ -6,19 +6,27 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { startDeckInjector } from './deck_injector.mjs';
 import { createSettingsStore, DEFAULT_SETTINGS } from './settings.mjs';
 import { createPresentation, getPresentationScript } from './ui.mjs';
-import { summarizeGeneration, summarizeTurnSpeed, summarizeTurnQueue } from './metrics.mjs';
+import { summarizeGeneration, summarizeSubagentTurnSpeed, summarizeTurnSpeed, summarizeTurnQueue } from './metrics.mjs';
 import { classifyRequestError } from './errors.mjs';
 import { createSqliteSnapshotCache } from './sqlite_cache.mjs';
 import { startLsWatchdog } from './ls_watchdog.mjs';
 import { startSelfReloadWatcher } from './reload.mjs';
-import { summarizeTurnMetrics } from './turn_metrics.mjs';
+import { summarizeSubagentExecution, summarizeSubagentTurnMetrics, summarizeTurnMetrics } from './turn_metrics.mjs';
 import { installAsyncHostRoutes, installEpipeGuard } from './host_bridge.mjs';
 import { createCdpNoticeManager } from './cdp_notice.mjs';
+import { createCloudTelemetryStore } from './cloud_telemetry.mjs';
 import { createUsageHistory } from './usage_history.mjs';
 import { createUsagePresentation } from './usage_ui.mjs';
+import { EFFORT_BAR_CSS, EFFORT_TRACK_MARKUP } from './effort_bar.mjs';
+import { CURRENT_VERSION, VERSION_ROUTE, createVersionChecker } from './version_check.mjs';
+import { createVersionPanel } from './version_ui.mjs';
+import { createPluginUpdater, UPDATE_ROUTE } from './version_update.mjs';
 
 const settingsStore = createSettingsStore();
-const PANEL_VERSION = 122;
+const checkVersion = createVersionChecker({ getPrefs: () => settingsStore.read() });
+const updatePlugin = createPluginUpdater({ sidecarDirectory: dirname(fileURLToPath(import.meta.url)), checkVersion });
+const cloudTelemetryStore = createCloudTelemetryStore();
+const PANEL_VERSION = 142;
 const presentation = createPresentation();
 export function getNotifyText(shortcutState, prefs) {
   const t = presentation.dictionaries[prefs?.settingsLanguage] || presentation.dictionaries['zh-CN'];
@@ -254,6 +262,7 @@ function parseGenRow(idx, data, includeTurnMetrics = true) {
     attempts,
     missingAttempts,
     pendingAttempt,
+    modelDisplayName: Buffer.isBuffer(m1.get(21)?.[0]) ? m1.get(21)[0].toString('utf8').trim() : '',
     generation: {
       requestIndex: idx, ttft, streaming,
       output: hasOutput ? usage.get(3)?.[0] || 0 : null,
@@ -311,13 +320,59 @@ async function makeEmptyContextResult(health = null) {
   };
 }
 
-async function inspectConversation(convId, exact = false) {
-  if (exact) lastDeckConvId = convId || '';
-  const dbPath = resolveConversationDb(lastDeckConvId ?? convId, lastDeckConvId === null);
-  if (!dbPath) return await makeEmptyContextResult(conversationDirs.some(dir => statSync(dir, { throwIfNoEntry: false })?.isDirectory()) ? null : { code: 'S3' });
+const ACTIVE_CONV_TTL_MS = 60_000;
+const recentActiveConversations = new Map();
+function touchActiveConversation(id) {
+  if (typeof id === 'string' && /^[0-9a-zA-Z_-]+$/.test(id)) {
+    const now = Date.now();
+    recentActiveConversations.set(id, now);
+    if (recentActiveConversations.size > 16) {
+      const cutoff = now - ACTIVE_CONV_TTL_MS;
+      for (const [entryId, seenAt] of recentActiveConversations) {
+        if (seenAt < cutoff) recentActiveConversations.delete(entryId);
+      }
+    }
+  }
+}
+function getActiveConversationIds() {
+  const cutoff = Date.now() - ACTIVE_CONV_TTL_MS;
+  for (const [id, seenAt] of recentActiveConversations) {
+    if (seenAt < cutoff) recentActiveConversations.delete(id);
+  }
+  const active = new Set(recentActiveConversations.keys());
+  if (lastDeckConvId) active.add(lastDeckConvId);
+  return [...active];
+}
 
+async function inspectConversation(convId, exact = false, subagentOnly = false) {
+  if (exact && !subagentOnly) lastDeckConvId = convId || '';
+  if (subagentOnly && !convId) return null;
+  return readSelectedConversation(subagentOnly ? convId : lastDeckConvId ?? convId,
+    !subagentOnly && lastDeckConvId === null, subagentOnly);
+}
+
+async function readSelectedConversation(convId, allowLatest, subagentOnly = false) {
+  touchActiveConversation(convId);
+  const dbPath = resolveConversationDb(convId, allowLatest);
+  if (subagentOnly && !dbPath) return null;
   const prefs = settingsStore.read();
+  if (!dbPath) {
+    const cloudSnapshot = cloudTelemetryStore.read(convId, prefs.showTurnMetrics);
+    if (cloudSnapshot) {
+      return {
+        health: null,
+        uiVersion: PANEL_VERSION,
+        ...cloudSnapshot,
+        prefs,
+        ...await fetchQuota(),
+      };
+    }
+    return await makeEmptyContextResult(conversationDirs.some(dir => statSync(dir, { throwIfNoEntry: false })?.isDirectory()) ? null : { code: 'S3' });
+  }
+  touchActiveConversation(basename(dbPath, '.db'));
+
   const snapshot = conversationCache.read(dbPath, prefs.showTurnMetrics);
+  if (subagentOnly && !snapshot?.subagent) return null;
   const health = conversationCache.health(dbPath);
   if (!snapshot) return await makeEmptyContextResult(health);
   return {
@@ -325,7 +380,7 @@ async function inspectConversation(convId, exact = false) {
     uiVersion: PANEL_VERSION,
     ...snapshot,
     prefs,
-    ...await fetchQuota(),
+    ...(subagentOnly ? NO_QUOTA : await fetchQuota()),
   };
 }
 
@@ -340,13 +395,20 @@ function readConversationSnapshot(dbPath, includeTurnMetrics = true) {
   let turnSteps = [];
   let metricsUserStepIndex = null;
   let executors = [];
+  let subagent = false;
   try {
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='trajectory_metadata_blob'").get()) {
+      const blob = db.prepare("SELECT data FROM trajectory_metadata_blob WHERE id='main'").get()?.data;
+      const meta = parsePbMap(Buffer.from(blob || []));
+      // CortexTrajectoryMetadata.parent_conversation_id=5, subagent_spec=8.
+      subagent = !!(meta.get(5)?.[0]?.length && meta.get(8)?.[0]?.length);
+    }
     rawRows = db.prepare('SELECT idx, data FROM gen_metadata ORDER BY idx ASC').all();
     cpRows = db.prepare('SELECT idx FROM steps WHERE step_type = 23 ORDER BY idx DESC').all();
     // A queued user input is not a new running turn until AGY consumes it.
     userStepIndex = db.prepare('SELECT idx FROM steps WHERE step_type = 14 AND status != 11 ORDER BY idx DESC LIMIT 1').get()?.idx ?? null;
     if (includeTurnMetrics) metricsUserStepIndex = db.prepare('SELECT idx FROM steps WHERE step_type = 14 ORDER BY idx DESC LIMIT 1').get()?.idx ?? null;
-    const firstTurnStep = userStepIndex ?? metricsUserStepIndex;
+    const firstTurnStep = subagent ? 0 : userStepIndex ?? metricsUserStepIndex;
     if (firstTurnStep !== null) {
       turnSteps = db.prepare('SELECT idx, step_type, status, metadata FROM steps WHERE idx >= ? ORDER BY idx').all(firstTurnStep).map(step => {
         const fields = parsePbMap(Buffer.from(step.metadata || []));
@@ -468,16 +530,57 @@ function readConversationSnapshot(dbPath, includeTurnMetrics = true) {
   const totalOutputTokens = Math.round(rawOut * genScale);
   const totalThinkingTokens = Math.round(rawThink * genScale);
 
+  let turnQueue, turnSpeed = null, childTurnMetrics = null;
+  if (subagent) {
+    // Parent messages and task notifications can start fresh executions without
+    // a USER_INPUT step. Never roll previous executions into this one's alerts.
+    const latestStep = turnSteps.findLast(step => ![17, 23].includes(step.step_type));
+    const executionId = latestStep?.executionId;
+    const steps = executionId ? turnSteps.filter(step => step.executionId === executionId) : [];
+    const executionByStep = new Map(turnSteps.map(step => [step.idx, step.executionId]));
+    const requests = executionId ? parsedRequests.filter(request => {
+      // The first request can still use the preceding execution's last step
+      // as input. Its persisted output steps are stronger attribution.
+      if (!request.stepIndices.length) return executionByStep.get(request.lastStepIndex) === executionId;
+      const linked = request.stepIndices.map(idx => executionByStep.get(idx)).filter(Boolean);
+      return linked.length > 0 && linked.every(id => id === executionId);
+    }) : [];
+    const childExecutors = executors.filter(item => item.executionId === executionId);
+    turnQueue = summarizeTurnQueue(requests, steps, steps[0]?.idx, childExecutors, true);
+    latestRequestError = requests.at(-1)?.requestError ?? classifyRequestError();
+    const execution = summarizeSubagentExecution(steps, childExecutors);
+    if (execution) {
+      let associationIncomplete = false;
+      // Turn totals and speed both require unambiguous execution attribution.
+      const executionRequests = parsedRequests.filter(request => {
+        const fromCurrentInput = executionByStep.get(request.lastStepIndex) === executionId;
+        if (!request.stepIndices.length) return fromCurrentInput;
+        const linked = request.stepIndices.map(idx => executionByStep.get(idx));
+        if (linked.every(id => id === executionId)) return true;
+        if (includeTurnMetrics && (linked.includes(executionId) || (linked.includes(undefined) && fromCurrentInput)
+          || (linked.every(id => !id) && request.stepIndices.some(idx => idx >= steps[0].idx)))) associationIncomplete = true;
+        return false;
+      });
+      turnSpeed = summarizeSubagentTurnSpeed(executionRequests, steps, execution);
+      if (includeTurnMetrics) childTurnMetrics = summarizeSubagentTurnMetrics(executionRequests, execution, associationIncomplete);
+    }
+  } else {
+    turnQueue = summarizeTurnQueue(parsedRequests, turnSteps, userStepIndex, executors);
+    turnSpeed = summarizeTurnSpeed(parsedRequests, turnSteps, userStepIndex);
+  }
+
   return {
-    turnSpeed: summarizeTurnSpeed(parsedRequests, turnSteps, userStepIndex),
-    turnQueue: summarizeTurnQueue(parsedRequests, turnSteps, userStepIndex, executors),
-    turnMetrics: includeTurnMetrics ? summarizeTurnMetrics(parsedRequests, turnSteps.map(step => ({ ...step, completedAtMs: step.recordedCompletedAtMs })), metricsUserStepIndex, executors) : null,
+    ...(subagent && { subagent: { model: parsedRequests.at(-1)?.modelDisplayName || '' } }),
+    turnSpeed,
+    turnQueue,
+    turnMetrics: subagent ? childTurnMetrics : includeTurnMetrics
+      ? summarizeTurnMetrics(parsedRequests, turnSteps.map(step => ({ ...step, completedAtMs: step.recordedCompletedAtMs })), metricsUserStepIndex, executors) : null,
     requestError: latestRequestError,
     generation: summarizeGeneration(latestGeneration),
     cachedIn: latest.cachedIn,
     uncachedIn: latest.uncachedIn,
     contextTokens: latest.contextTokens,
-    maxContextTokens,
+    maxContextTokens: subagent ? latest.maxContextTokens || 0 : maxContextTokens,
     lastStepEpochMs,
     turn0Tokens,
     totalOutputTokens,
@@ -485,10 +588,13 @@ function readConversationSnapshot(dbPath, includeTurnMetrics = true) {
   };
 }
 
+const MIN_USAGE_EPOCH_S = 1577836800; // 2020-01-01T00:00:00Z
+const isValidEpochSec = value => Number.isSafeInteger(value) && value >= MIN_USAGE_EPOCH_S && value < 4e9;
+
 // One model request for the usage history: when it started, which model answered and what it
 // consumed. Field numbers follow CortexStepGeneratorMetadata.chat_model (1) -> ChatModelMetadata
-// .usage (4) and .chat_start_metadata (9).created_at (4); a step's own created_at is
-// CortexStepMetadata field 1.
+// .usage (4) and optional .chat_start_metadata (9).created_at (4); a step's own created_at
+// is CortexStepMetadata field 1.
 function parseUsageRow(data, stepMetadata) {
   // Views, not copies: a scan walks every stored request.
   const bytes = value => (value instanceof Uint8Array ? Buffer.from(value.buffer, value.byteOffset, value.byteLength) : Buffer.alloc(0));
@@ -503,40 +609,59 @@ function parseUsageRow(data, stepMetadata) {
   if (!Object.values(tokens).some(Boolean)) return null;
   const seconds = stamp => parsePbMap(bytes(stamp)).get(1)?.[0];
   let startedAt = seconds(parsePbMap(bytes(chat.get(9)?.[0])).get(4)?.[0]);
-  if (!(startedAt > 0)) {
-    // A row without a request start is dated by the first step it produced; if that index cannot
-    // be decoded, the request stays undated.
-    const first = top.get(2)?.[0];
-    let stepIndex = typeof first === 'number' ? first : null;
-    if (first?.length) try { stepIndex = readVarint(first, 0)[0]; } catch {}
-    if (stepIndex !== null) startedAt = seconds(parsePbMap(bytes(stepMetadata(stepIndex))).get(1)?.[0]);
+  if (!isValidEpochSec(startedAt)) {
+    // Most rows carry no chat_start_metadata.created_at; date them by the first available step.
+    startedAt = null;
+    for (const entry of top.get(2) || []) {
+      if (typeof entry === 'number') {
+        const candidate = seconds(parsePbMap(bytes(stepMetadata(entry))).get(1)?.[0]);
+        if (isValidEpochSec(candidate)) { startedAt = candidate; break; }
+      } else if (entry?.length) {
+        let offset = 0;
+        while (offset < entry.length) {
+          let stepIndex;
+          try {
+            [stepIndex, offset] = readVarint(entry, offset);
+          } catch { break; }
+          const candidate = seconds(parsePbMap(bytes(stepMetadata(stepIndex))).get(1)?.[0]);
+          if (isValidEpochSec(candidate)) { startedAt = candidate; break; }
+        }
+        if (startedAt !== null) break;
+      }
+    }
   }
   // response_id (11), else message_id (7), within api_provider (6).
   const responseId = text(11);
   const messageId = text(7);
-  // model_display_name (21), else response_model (19): the names the host itself shows.
+  // model_display_name (21), else response_model (19): preserves legacy records without display names.
   const name = field => bytes(chat.get(field)?.[0]).toString('utf8').trim().slice(0, 80);
   return {
-    at: startedAt > 0 && startedAt < 4e9 ? startedAt * 1000 : null,
+    at: isValidEpochSec(startedAt) ? startedAt * 1000 : null,
     id: responseId ? `r${count(6)}:${responseId}` : messageId ? `m${count(6)}:${messageId}` : '',
     model: name(21) || name(19),
     ...tokens,
   };
 }
 
-function readConversationUsage(dbPath) {
-  // A conversation that is not open is read as an immutable file: a plain read-only connection
-  // to a WAL-mode database would leave -wal and -shm files next to every one it touched.
+function readConversationUsage(dbPath, { immutable = true } = {}) {
+  // Closed, idle conversations without a non-empty WAL are opened immutable so SQLite does not
+  // leave stray -wal/-shm files beside them; active or recently modified ones use plain read-only.
+  const hasActiveWal = (statSync(dbPath + '-wal', { throwIfNoEntry: false })?.size || 0) > 0;
+  const useImmutable = immutable && !hasActiveWal;
   let location = dbPath;
-  if (!existsSync(dbPath + '-wal')) {
+  if (useImmutable) {
     location = pathToFileURL(dbPath);
     location.searchParams.set('immutable', '1');
   }
-  const db = new DatabaseSync(location, { readOnly: true });
+  const db = new DatabaseSync(location, { readOnly: true, timeout: 150 });
   try {
+    if (!useImmutable) db.exec('PRAGMA busy_timeout = 150');
     if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='gen_metadata'").get()) return [];
+    const hasSteps = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='steps'").get());
     let stepRow = null;
-    const stepMetadata = index => (stepRow ??= db.prepare('SELECT metadata FROM steps WHERE idx = ?')).get(index)?.metadata;
+    const stepMetadata = hasSteps
+      ? index => (stepRow ??= db.prepare('SELECT metadata FROM steps WHERE idx = ?')).get(index)?.metadata
+      : () => undefined;
     return db.prepare('SELECT data FROM gen_metadata ORDER BY idx ASC').all()
       .map(row => parseUsageRow(row.data, stepMetadata))
       .filter(Boolean);
@@ -545,12 +670,16 @@ function readConversationUsage(dbPath) {
   }
 }
 
-const usageHistory = createUsageHistory({ directories: conversationDirs, readRequests: readConversationUsage });
+const usageHistory = createUsageHistory({
+  directories: conversationDirs,
+  readRequests: readConversationUsage,
+  getActiveIds: getActiveConversationIds,
+});
 
 // Conversations are scanned only while a setting shows their history.
-async function inspectUsage(prefs = settingsStore.read()) {
+async function inspectUsage(prefs = settingsStore.read(), activeConversationId = '') {
   if (prefs.showUsageActivity !== true && prefs.showModelUsage !== true) return { enabled: false };
-  return { enabled: true, ...await usageHistory.read() };
+  return { enabled: true, ...await usageHistory.read({ activeId: activeConversationId }) };
 }
 
 const PV_SVG = {
@@ -955,6 +1084,31 @@ const UI_HTML = `<!DOCTYPE html>
     }
     .settings { display: flex; flex-direction: column; gap: 0; width: 100%; }
     .sidebar-content { padding: 12px 14px; }
+    .version-panel { max-width: 1120px; margin: 0 auto 10px; font-size: 12.5px; color: var(--foreground, #ebebeb); }
+    .sidebar-nav:has(.sidebar-tabs[data-view="stats"]) + .version-panel :is(.version-line, #version-status) { display: none; }
+    .sidebar-nav:has(.sidebar-tabs[data-view="stats"]) + .version-panel:not(:has(#version-notice:not([hidden]))) { display: none; }
+    .version-line, .version-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; }
+    .version-line { justify-content: space-between; flex-wrap: nowrap; }
+    .version-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: center; gap: 5px; width: 124px; margin-left: auto; flex-shrink: 0; }
+    .version-controls > .pv-swatch { width: 100%; padding: 4px 4px; white-space: nowrap; }
+    .version-panel[lang="en"] .version-controls { width: auto; min-width: 124px; grid-template-columns: auto auto; }
+    .version-panel[lang="en"] .version-controls > .pv-swatch { padding: 4px 8px; }
+    #version-check { color: var(--foreground, #ebebeb); }
+    #version-check:disabled { opacity: .7; cursor: wait; }
+    .version-button { min-height: 28px; padding: 3px 8px; border-radius: 5px; border: 1px solid var(--border, #555); background: var(--card, #222225); color: inherit; font: inherit; cursor: pointer; }
+    .version-button:hover:not(:disabled) { background: color-mix(in srgb, var(--foreground, #ebebeb) 9%, var(--card, #222225)); }
+    .version-button:disabled { opacity: .7; cursor: wait; }
+    .version-panel :is(button, a):focus-visible { outline: 2px solid #388bfd; outline-offset: 1px; }
+    .version-feedback { margin: 0; line-height: 1.5; }
+    .version-feedback:not(:empty) { margin-top: 5px; }
+    .version-notice { margin-top: 7px; padding: 8px 10px; border-radius: 7px; border: 1px solid var(--border, #555); background: var(--card, #222225); line-height: 1.5; }
+    .version-notice p { margin: 4px 0; }
+    .version-notice .version-feedback:empty { margin: 0; }
+    .version-notice a { color: inherit; text-decoration: underline; }
+    .version-actions { margin-top: 5px; }
+    #version-update { border-color: #2b7fff; background: color-mix(in srgb, #2b7fff 18%, var(--card, #222225)); }
+    #version-update:hover:not(:disabled) { background: color-mix(in srgb, #2b7fff 29%, var(--card, #222225)); }
+    @media(pointer:coarse) { .version-button, #version-notify, .version-actions a { min-height: 44px; } .version-actions a { display: inline-flex; align-items: center; } }
     .sidebar-view[hidden] { display: none; }
     .sidebar-nav { position: sticky; top: 0; z-index: 20; margin: -12px -14px 10px; padding: 8px 14px; background: var(--background, #141414); border-bottom: 1px solid color-mix(in srgb, var(--border, rgba(142,142,147,.24)) 65%, transparent); }
     .sidebar-tabs { position: relative; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: center; max-width: 1120px; margin: 0 auto; padding: 2.5px; border-radius: 7px; background: color-mix(in srgb, var(--foreground, #ebebeb) 6%, var(--background, #141414)); border: 1px solid color-mix(in srgb, var(--foreground, #ebebeb) 10%, transparent); }
@@ -970,6 +1124,8 @@ const UI_HTML = `<!DOCTYPE html>
     .nowrap { white-space: nowrap; }
     .settings-scope { margin-top: 8px; padding: 10px 0 4px; border-top: 1px solid var(--border, rgba(142,142,147,.22)); font-size: 12px; font-weight: 600; color: var(--muted-foreground, #8e8e93); letter-spacing: .01em; }
     .settings-scope.metric-setting { position: relative; }
+    .settings-scope.metric-setting > .setting-head:focus-visible { outline: 2px solid #388bfd; outline-offset: 2px; border-radius: 4px; }
+    .settings-scope .metric-help { font-weight: 400; font-size: 12px; letter-spacing: normal; }
     .settings-scope-title { font-size: 12px; font-weight: 600; color: var(--muted-foreground, #8e8e93); }
     .setting-card { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 7px 0; border-top: 1px solid color-mix(in srgb, var(--border, rgba(142,142,147,.24)) 55%, transparent); background: transparent; }
     .settings > .setting-card:first-child, .settings-scope + .setting-card { border-top: 0; }
@@ -1198,7 +1354,7 @@ const UI_HTML = `<!DOCTYPE html>
     .usage-totals { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
     .usage-total { display: flex; flex-direction: column; min-width: 0; }
     .usage-total > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .usage-total > b { font-weight: 500; white-space: nowrap; color: var(--foreground, #ebebeb); color: color-mix(in srgb, var(--foreground, #ebebeb) 88%, transparent); }
+    .usage-total > b { overflow: hidden; text-overflow: ellipsis; font-weight: 500; white-space: nowrap; color: var(--foreground, #ebebeb); color: color-mix(in srgb, var(--foreground, #ebebeb) 88%, transparent); }
     /* One column per week, newest on the right; a block too narrow for a year drops the oldest weeks. */
     .usage-heat { --usage-cell: 10px; display: flex; justify-content: flex-end; gap: 2px; width: fit-content; max-width: 100%; padding-top: 14px; overflow: hidden; }
     .usage-heat-col { position: relative; flex: none; display: flex; flex-direction: column; gap: 2px; }
@@ -1224,8 +1380,8 @@ const UI_HTML = `<!DOCTYPE html>
     .usage-nav button:hover:enabled { color: var(--foreground, #ebebeb); background: color-mix(in srgb, var(--foreground, #ebebeb) 8%, transparent); }
     .usage-nav button:disabled { opacity: .35; cursor: default; }
     .usage-nav button:focus-visible { outline: 2px solid #388bfd; outline-offset: 1px; }
-    .usage-range { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .usage-nav-total { flex: none; margin-left: auto; white-space: nowrap; color: var(--foreground, #ebebeb); color: color-mix(in srgb, var(--foreground, #ebebeb) 88%, transparent); }
+    .usage-range { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .usage-nav-total { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; margin-left: auto; white-space: nowrap; color: var(--foreground, #ebebeb); color: color-mix(in srgb, var(--foreground, #ebebeb) 88%, transparent); }
     /* A bar is a column: free space, then the stack, sharing the height by tokens. Its label hangs below. */
     .usage-bars { display: flex; gap: 3px; height: 72px; margin-bottom: 14px; border-bottom: 1px solid var(--border, rgba(142, 142, 147, 0.24)); }
     .usage-bar { position: relative; flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; align-items: center; }
@@ -1236,7 +1392,7 @@ const UI_HTML = `<!DOCTYPE html>
     .usage-dot { width: 10px; height: 10px; border-radius: 3px; }
     .usage-model-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .usage-model-share { min-width: 30px; text-align: right; color: var(--muted-foreground, #8e8e93); }
-    .usage-model-tokens { min-width: 40px; text-align: right; font-weight: 500; color: var(--foreground, #ebebeb); color: color-mix(in srgb, var(--foreground, #ebebeb) 88%, transparent); }
+    .usage-model-tokens { min-width: 40px; text-align: right; white-space: nowrap; font-weight: 500; color: var(--foreground, #ebebeb); color: color-mix(in srgb, var(--foreground, #ebebeb) 88%, transparent); }
     @container stats (width < 420px) {
       body[data-show-quota-dividers="true"] .stats-quota .quota-group + .quota-group { padding-top: calc(var(--agy-section-gap, 6px) + 4px); border-top: 1px solid var(--border, rgba(142, 142, 147, 0.24)); }
       .usage-block:not([hidden]) ~ .usage-block:not([hidden]) { padding-top: calc(var(--agy-section-gap, 6px) + 2px); border-top: 1px solid var(--border, rgba(142, 142, 147, 0.24)); }
@@ -1410,6 +1566,7 @@ const UI_HTML = `<!DOCTYPE html>
     .cdp-notice { max-width: 1120px; margin: 0 auto 10px; padding: 8px 10px; border-radius: 7px; border: 1px solid color-mix(in srgb, #e0a030 45%, transparent); background: color-mix(in srgb, #e0a030 8%, var(--background, #141414)); font-size: 12px; color: var(--muted-foreground, #8e8e93); }
     #health-code { text-align: end; font-size: 12px; color: var(--muted-foreground, #8e8e93); }
     #sidebar-stats[data-stale="true"] .stats-layout { opacity: .75; }
+    #sidebar-stats[data-context-pending] .stats-layout { visibility: hidden; }
     .cdp-notice[hidden] { display: none; }
     .cdp-notice-title { font-weight: 600; color: var(--foreground, #ebebeb); margin-bottom: 3px; }
     .cdp-notice p { margin: 0 0 4px; }
@@ -1422,28 +1579,51 @@ const UI_HTML = `<!DOCTYPE html>
     .cdp-fix-status:empty { display: none; }
     .cdp-notice summary { cursor: pointer; color: var(--foreground, #ebebeb); }
     .cdp-notice ol { margin: 5px 0 0; padding-left: 18px; display: grid; gap: 4px; }
-    .cdp-notice code { user-select: text; font-family: ui-monospace, Consolas, monospace; font-size: 11px; padding: 0 3px; border-radius: 3px; background: color-mix(in srgb, var(--foreground, #ebebeb) 8%, transparent); color: var(--foreground, #ebebeb); word-break: break-all; }
+    .cdp-notice code, .metric-help code { user-select: text; font-family: ui-monospace, Consolas, monospace; font-size: 11px; padding: 0 3px; border-radius: 3px; background: color-mix(in srgb, var(--foreground, #ebebeb) 8%, transparent); color: var(--foreground, #ebebeb); box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+    .cdp-notice code { word-break: break-all; }
+    .setting-model-card { container-type: inline-size; container-name: model-card; }
+    .setting-model-grid { display: grid; grid-template-columns: repeat(2, auto); justify-content: start; align-items: center; column-gap: 14px; row-gap: 6px; }
+    .setting-model-grid .setting-pair-item > label { font-size: 13px; color: var(--foreground, #ebebeb); min-width: 0; }
+    @container model-card (min-width: 520px) { .setting-model-grid { grid-template-columns: repeat(3, auto); } }
+    @container model-card (min-width: 680px) { .setting-model-grid { grid-template-columns: repeat(4, auto); } }
+    @container model-card (min-width: 840px) { .setting-model-grid { grid-template-columns: repeat(5, auto); } }
+    @container model-card (min-width: 960px) { .setting-model-grid { grid-template-columns: repeat(6, auto); } }
+    @container model-card (min-width: 380px) { #sidebar-settings[lang^="zh"] .setting-model-grid { grid-template-columns: repeat(3, auto); } }
+    @container model-card (min-width: 510px) { #sidebar-settings[lang^="zh"] .setting-model-grid { grid-template-columns: repeat(4, auto); } }
+    @container model-card (min-width: 640px) { #sidebar-settings[lang^="zh"] .setting-model-grid { grid-template-columns: repeat(5, auto); } }
+    @container model-card (min-width: 740px) { #sidebar-settings[lang^="zh"] .setting-model-grid { grid-template-columns: repeat(6, auto); } }
+    .pv-mp { display: flex; flex-wrap: nowrap; align-items: center; gap: 8px; font-size: 11.5px; transition: opacity .18s ease; }
+    .pv-mp-row { display: inline-flex; align-items: center; justify-content: space-between; gap: 10px; padding: 2px 6px 2px 8px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--border, rgba(142,142,147,.28)) 85%, transparent); background: var(--card, color-mix(in srgb, var(--foreground, #ebebeb) 4%, var(--background, #141414))); box-shadow: 0 1px 2.5px rgba(0, 0, 0, .08); color: var(--foreground, #ebebeb); white-space: nowrap; flex-shrink: 0; }
+    .pv-mp-row-main { display: inline-flex; align-items: center; min-width: 0; }
+    .pv-mp-row-name { color: var(--foreground, #ebebeb); }
+    .pv-mp-row-effort { display: inline-block; overflow: hidden; white-space: nowrap; max-width: 40px; margin-left: 5px; opacity: .75; color: var(--muted-foreground, #8e8e93); transition: max-width .2s ease, opacity .18s ease, margin-left .2s ease; }
+    .pv-mp-row-tag { display: inline-flex; align-items: center; overflow: hidden; white-space: nowrap; max-width: 44px; margin-left: 5px; padding: 0 5px; border-radius: 999px; background: var(--secondary, rgba(142,142,147,.16)); color: var(--muted-foreground, #8e8e93); font-size: 10px; line-height: 15px; transition: max-width .2s ease, opacity .18s ease, margin-left .2s ease, padding .2s ease; }
+    .pv-mp-row-chev { display: inline-flex; align-items: center; color: var(--muted-foreground, #8e8e93); opacity: .75; flex-shrink: 0; }
+    .pv-mp-row-chev svg { width: 12px; height: 12px; display: block; }
+    [data-setting-card="modelEffortPicker"][data-checked="false"] .pv-mp { opacity: .4; }
+    [data-setting-card="modelEffortPicker"][data-hide-default-effort="true"] .pv-mp-row-effort { max-width: 0; opacity: 0; margin-left: 0; }
+    [data-setting-card="modelEffortPicker"][data-hide-model-tags="true"] .pv-mp-row-tag { max-width: 0; opacity: 0; margin-left: 0; padding-left: 0; padding-right: 0; }
+    .pv-model-list { display: flex; flex-wrap: wrap; gap: 5px; padding-top: 4px; }
+    [data-setting-card="modelEffortPicker"]:not([data-customize-models="true"]) .pv-model-list { display: none; }
+    .pv-model-list:empty { display: none; }
+    .pv-model-item { width: auto; max-width: 100%; min-height: 22px; justify-content: center; padding: 2px 9px; border-radius: 999px; font-size: 11.5px; line-height: 1.25; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .pv-model-item[data-active="true"] { border-color: #4ea84e; background: color-mix(in srgb, #4ea84e 14%, var(--card, #222225)); }
+    .pv-model-empty { font-size: 11.5px; color: var(--muted-foreground, #8e8e93); padding: 2px 2px 0; }
     .pv-usage-heat { display: flex; gap: 2px; transition: opacity .18s ease; }
     .pv-usage-bars { display: flex; align-items: flex-end; gap: 3px; height: 18px; transition: opacity .18s ease; }
     .pv-usage-bars > span { display: flex; flex-direction: column; width: 6px; border-radius: 1.5px 1.5px 0 0; overflow: hidden; }
     .pv-usage-bars i { display: block; }
     [data-setting-card="showUsageActivity"][data-checked="false"] .pv-usage-heat,
     [data-setting-card="showModelUsage"][data-checked="false"] .pv-usage-bars { opacity: .4; }
-    .setting-model-grid { display: grid; grid-template-columns: auto auto; justify-content: start; align-items: center; column-gap: 14px; row-gap: 6px; }
-    .setting-model-grid .setting-pair-item > label { font-size: 13px; color: var(--foreground, #ebebeb); min-width: 0; }
-    .setting-model-grid .setting-preview { padding: 0; }
-    .pv-mp { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 11.5px; transition: opacity .18s ease; }
-    .pv-mp-bubble { width: 20px; height: 20px; border-radius: 999px; display: inline-grid; place-items: center; background: var(--secondary, rgba(142,142,147,.16)); color: var(--muted-foreground, #8e8e93); font-size: 12px; transition: opacity .18s ease, width .18s ease, margin .18s ease; overflow: hidden; }
-    .pv-mp-pill { gap: 4px; padding: 2px 7px; }
-    .pv-mp-name { color: var(--foreground, #ebebeb); }
-    .pv-mp-effort { color: var(--muted-foreground, #8e8e93); }
-    [data-setting-card="modelEffortPicker"][data-checked="false"] .pv-mp { opacity: .4; }
-    [data-setting-card="modelEffortPicker"][data-keep-native="false"] .pv-mp-bubble { width: 0; opacity: 0; margin-right: -6px; }
-    .pv-model-list { display: flex; flex-direction: column; gap: 5px; padding-top: 4px; }
-    [data-setting-card="modelEffortPicker"]:not([data-customize-models="true"]) .pv-model-list { display: none; }
-    .pv-model-list:empty { display: none; }
-    .pv-model-item { width: 100%; justify-content: flex-start; padding: 5px 10px; font-size: 12px; text-align: left; }
-    .pv-model-empty { font-size: 11.5px; color: var(--muted-foreground, #8e8e93); padding: 2px 2px 0; }
+    ${EFFORT_BAR_CSS}
+    .pv-effort-bar { flex: 1 1 88px; min-width: 68px; max-width: 132px; display: flex; align-items: center; }
+    .pv-effort-bar .ces-inline { width: 100%; padding-top: 0; }
+    .pv-effort-bar .ces-track { height: 14px; --ces-fill: calc(100% - 7px) !important; box-shadow: 0 0 8px rgba(168, 85, 247, 0.35), inset 0 1px 1.5px rgba(0, 0, 0, 0.24) !important; }
+    .pv-effort-bar .ces-fill { border-radius: 7px 0 0 7px; }
+    .pv-effort-bar .ces-knob { width: 14px; height: 14px; margin: -7px 0 0 -7px; }
+    .setting-model-card:not([data-effort-bar="true"]) .pv-effort-bar { display: none; }
+    .setting-pair-item > .setting-head { display: inline-flex; align-items: center; gap: 6px; }
+    .setting-model-card:not([data-help-dismissed]):has([data-setting-card="showEffortBar"] .setting-head:hover, [data-setting-card="showEffortBar"]:focus-within) > #help-effort-bar { visibility: visible; }
     @media(pointer:coarse) { .pv-swatch { min-height: 40px; } }
   </style>
 </head>
@@ -1455,6 +1635,25 @@ const UI_HTML = `<!DOCTYPE html>
       <button type="button" id="sidebar-tab-stats" role="tab" aria-selected="true" aria-controls="sidebar-stats" tabindex="0">统计</button>
       <span class="sidebar-toggle-track" aria-hidden="true"><span class="sidebar-toggle-thumb"></span></span>
       <button type="button" id="sidebar-tab-settings" role="tab" aria-selected="false" aria-controls="sidebar-settings" tabindex="-1">设置</button>
+    </div>
+  </div>
+  <div class="version-panel" id="version-panel">
+    <div class="version-line">
+      <strong id="version-number">${CURRENT_VERSION ? 'v' + CURRENT_VERSION : '—'}</strong>
+      <div class="version-controls">
+        <button type="button" class="pv-swatch" id="version-notify" aria-pressed="${DEFAULT_SETTINGS.notifyUpdates}" data-active="${DEFAULT_SETTINGS.notifyUpdates}" data-toggle-setting="notifyUpdates"></button>
+        <button type="button" class="pv-swatch" id="version-check" aria-describedby="version-status"></button>
+      </div>
+    </div>
+    <p class="version-feedback" id="version-status" role="status"></p>
+    <div class="version-notice" id="version-notice" hidden>
+      <strong id="version-available" role="status" aria-atomic="true"></strong>
+      <div class="version-actions">
+        <button type="button" class="version-button" id="version-update" aria-describedby="version-update-status"></button>
+        <a id="version-release" target="_blank" rel="noopener noreferrer"></a>
+        <button type="button" class="version-button" id="version-dismiss"></button>
+      </div>
+      <p class="version-feedback" id="version-update-status" role="status" aria-atomic="true"></p>
     </div>
   </div>
   <aside class="cdp-notice" id="cdp-notice" role="status" aria-atomic="true" hidden>
@@ -1583,18 +1782,12 @@ const UI_HTML = `<!DOCTYPE html>
     ${renderCheckCard({ id: 'setting-pop-animation', key: 'popAnimation', checked: DEFAULT_SETTINGS.popAnimation })}
 
     <div class="settings-scope" data-settings-scope="features" data-i18n="featuresSection"></div>
-    <div class="setting-card setting-model-card" data-setting-card="modelEffortPicker" data-checked="${DEFAULT_SETTINGS.modelEffortPicker}" data-keep-native="${DEFAULT_SETTINGS.keepNativeModelEntry}" data-customize-models="false">
+    <div class="setting-card setting-model-card" data-setting-card="modelEffortPicker" data-checked="${DEFAULT_SETTINGS.modelEffortPicker}" data-hide-model-tags="${DEFAULT_SETTINGS.hideModelTags}" data-hide-default-effort="${DEFAULT_SETTINGS.hideDefaultEffort}" data-customize-models="false">
       <div class="setting-model-grid">
         <div class="setting-pair-item">
           <label class="setting-check">
             <input id="setting-model-effort-picker" name="modelEffortPicker" type="checkbox"${DEFAULT_SETTINGS.modelEffortPicker ? ' checked' : ''} />
             <span data-i18n="modelEffortPicker"></span>
-          </label>
-        </div>
-        <div class="setting-pair-item" data-setting-card="keepNativeModelEntry" data-checked="${DEFAULT_SETTINGS.keepNativeModelEntry}" data-parent-off="${!DEFAULT_SETTINGS.modelEffortPicker}">
-          <label class="setting-check">
-            <input id="setting-keep-native-model-entry" name="keepNativeModelEntry" type="checkbox"${DEFAULT_SETTINGS.keepNativeModelEntry ? ' checked' : ''} />
-            <span data-i18n="keepNativeModelEntry"></span>
           </label>
         </div>
         <div class="setting-pair-item" data-setting-card="hideModelTags" data-checked="${DEFAULT_SETTINGS.hideModelTags}" data-parent-off="${!DEFAULT_SETTINGS.modelEffortPicker}">
@@ -1609,19 +1802,37 @@ const UI_HTML = `<!DOCTYPE html>
             <span data-i18n="hideDefaultEffort"></span>
           </label>
         </div>
-        <div class="setting-preview" aria-hidden="true">
-          <div class="pv-mp">
-            <span class="pv-mp-bubble">⋯</span>
-            <span class="pv-pill pv-mp-pill"><span class="pv-mp-name">Argon</span><span class="pv-mp-effort">High</span></span>
-          </div>
-        </div>
         <div class="setting-pair-item" data-setting-card="customizeModelList" data-checked="${DEFAULT_SETTINGS.customizeModelList}" data-parent-off="${!DEFAULT_SETTINGS.modelEffortPicker}">
           <label class="setting-check">
             <input id="setting-customize-model-list" name="customizeModelList" type="checkbox"${DEFAULT_SETTINGS.customizeModelList ? ' checked' : ''} />
             <span data-i18n="customizeModelList"></span>
           </label>
         </div>
+        <div class="setting-pair-item" data-setting-card="expandModelList" data-checked="false" data-parent-off="true">
+          <label class="setting-check">
+            <input id="setting-expand-model-list" type="checkbox" data-ui-toggle="expandModelList" />
+            <span data-i18n="expandModelList"></span>
+          </label>
+        </div>
+        <div class="setting-pair-item" data-setting-card="showEffortBar" data-checked="false" data-parent-off="${!DEFAULT_SETTINGS.modelEffortPicker}">
+          <div class="setting-head">
+            <label class="setting-check">
+              <input name="showEffortBar" type="checkbox" disabled aria-describedby="help-effort-bar" />
+              <span data-i18n="showEffortBar"></span>
+            </label><span class="setting-help-dot" aria-hidden="true">?</span>
+          </div>
+        </div>
       </div>
+      <div class="setting-preview" aria-hidden="true">
+        <div class="pv-mp">
+          <span class="pv-mp-row">
+            <span class="pv-mp-row-main"><span class="pv-mp-row-name">Gemini 4 Argon</span><span class="pv-mp-row-effort">High</span><span class="pv-mp-row-tag">New</span></span>
+            <span class="pv-mp-row-chev"><svg viewBox="0 -960 960 960" fill="currentColor" aria-hidden="true"><path d="M504-480 320-664l56-56 240 240-240 240-56-56 184-184Z"/></svg></span>
+          </span>
+          <div class="pv-effort-bar">${EFFORT_TRACK_MARKUP}</div>
+        </div>
+      </div>
+      <div class="metric-help" id="help-effort-bar" role="tooltip"><span data-i18n="effortBarCredit"></span><code>LLYSH-HANNARI/antigravity-Codex-Claude-effort-slider</code><span data-i18n="effortBarCreditSuffix"></span></div>
       <div class="pv-model-list" id="setting-model-list" data-toggle-setting="hiddenModels" role="group"></div>
     </div>
     ${renderCheckCard({ id: 'setting-highlight-active-model', key: 'highlightActiveModel', checked: false })}
@@ -1712,8 +1923,6 @@ const UI_HTML = `<!DOCTYPE html>
         ${PV_TURN_ITEMS.map(([key, labelKey, value]) => `<div class="turn-bar-item" data-turn-row="${key}"><span class="turn-bar-line"></span><span class="turn-bar-label" data-i18n="${labelKey}"></span>${key === 'requests' ? '<span class="turn-bar-short" data-i18n="turnReqsShort" aria-hidden="true">Re</span>' : ''}<span class="turn-bar-val">${value}</span></div>`).join('')}
       </div></div>
     </div>
-    ${renderCheckCard({ id: 'setting-usage-activity', key: 'showUsageActivity', checked: DEFAULT_SETTINGS.showUsageActivity })}
-    ${renderCheckCard({ id: 'setting-model-usage', key: 'showModelUsage', checked: DEFAULT_SETTINGS.showModelUsage })}
     <div class="setting-card setting-threshold-card" data-setting-card="showQueueWarnings" data-checked="${DEFAULT_SETTINGS.showQueueWarnings}">
       <div class="setting-head setting-pair-head">
         <div class="setting-pair-item">
@@ -1732,6 +1941,16 @@ const UI_HTML = `<!DOCTYPE html>
       </div>
       <div class="setting-preview" aria-hidden="true">${PV_CARD_PREVIEW.showQueueWarnings}</div>
     </div>
+
+    <div class="settings-scope metric-setting" data-settings-scope="usage">
+      <div class="setting-head" tabindex="0" aria-describedby="help-usage-scope">
+        <span class="settings-scope-title" data-i18n="usageSection"></span>
+        <span class="setting-help-dot" aria-hidden="true">?</span>
+      </div>
+      <div class="metric-help" id="help-usage-scope" role="tooltip" data-i18n="usageSectionTip"></div>
+    </div>
+    ${renderCheckCard({ id: 'setting-usage-activity', key: 'showUsageActivity', checked: DEFAULT_SETTINGS.showUsageActivity })}
+    ${renderCheckCard({ id: 'setting-model-usage', key: 'showModelUsage', checked: DEFAULT_SETTINGS.showModelUsage })}
   </section>
 
   </main>
@@ -1741,14 +1960,26 @@ const UI_HTML = `<!DOCTYPE html>
     const usageUi = (${createUsagePresentation.toString()})(presentation.formatTokens, presentation.escapeHtml);
     ${renderFieldEditor.toString()}
     let prefs = ${JSON.stringify(DEFAULT_SETTINGS)};
+    let prefsSig = JSON.stringify(prefs);
     let labels = presentation.apply(document.body, prefs);
     let settingsLabels = presentation.dictionaries[prefs.settingsLanguage];
+    const versionPanel = (${createVersionPanel.toString()})(
+      document.getElementById('version-panel'),
+      async mode => {
+        const res = await postApi('${VERSION_ROUTE}', { mode }, AbortSignal.timeout(6000));
+        return res.json();
+      },
+      saveSettings,
+      async version => {
+        const res = await postApi('${UPDATE_ROUTE}', { version }, AbortSignal.timeout(60_000));
+        return res.json();
+      },
+    );
     let savingSettings = false;
     let settingsEpoch = 0;
     let lastData = null, refreshing = false, refreshFailures = 0;
+    let conversationId = null, conversationEpoch = 0;
     let sampleCode = '', sampleCount = 0, healthCode = '';
-    let renderedKey = '';
-    let cacheIconSvg = null;
     // Usage history: fetched only while a setting shows it, and then about once a minute.
     let usageData = null;
     let usageDueAt = 0;
@@ -1760,13 +1991,17 @@ const UI_HTML = `<!DOCTYPE html>
     function usageBlocks() {
       return { activity: prefs.showUsageActivity === true, models: prefs.showModelUsage === true };
     }
+    function usageEnabled() {
+      const shown = usageBlocks();
+      return shown.activity || shown.models;
+    }
     function renderUsage() {
       const shown = usageBlocks();
       const root = document.getElementById('usage-root');
-      const hidden = !shown.activity && !shown.models;
+      const hidden = !usageEnabled();
       if (root.hidden !== hidden) root.hidden = hidden;
       const common = { today: usageUi.localDay(Date.now()), language: document.body.dataset.language };
-      const views = { activity: { ...common, scale: usageScale }, models: { ...common, period: usagePeriod, shift: usageShift } };
+      const views = { activity: { ...common, scale: usageScale }, models: { ...common, period: usagePeriod, shift: usageShift, showUnread: !shown.activity } };
       for (const name of ['activity', 'models']) {
         const block = document.getElementById('usage-' + name);
         if (block.hidden === shown[name]) block.hidden = !shown[name];
@@ -1778,12 +2013,14 @@ const UI_HTML = `<!DOCTYPE html>
       }
     }
     async function refreshUsage() {
-      const shown = usageBlocks();
-      if (usageBusy || panelLocked || !(shown.activity || shown.models) || sidebarView !== 'stats' || Date.now() < usageDueAt) return;
+      if (usageBusy || savingSettings || panelLocked || !usageEnabled() || sidebarView !== 'stats' || Date.now() < usageDueAt) return;
       usageBusy = true;
       try {
+        const urlParams = new URLSearchParams(window.location.search);
+        const convId = window.sidecar?.conversationId ?? urlParams.get('conversationId') ?? '';
         // A first scan of a long history can take a while; give up on a request that hangs.
-        const d = await (await postApi('/api/usage', {}, AbortSignal.timeout(30000))).json();
+        const d = await (await postApi('/api/usage', { conversationId: convId }, AbortSignal.timeout(30000))).json();
+        if (d?.enabled === false) { usageDueAt = 0; return; }
         if (!Array.isArray(d.days)) throw new Error('usage unavailable');
         usageData = d;
         usageDueAt = Date.now() + 60000;
@@ -1808,8 +2045,28 @@ const UI_HTML = `<!DOCTYPE html>
       (used?.disabled ? document.querySelector('[data-usage-shift]:enabled') : used)?.focus();
     });
     const sidebarTabs = document.querySelector('.sidebar-tabs');
+    const panel = document.querySelector('.panel');
+    let statsSig, cacheSig, quotaSig;
     let sidebarView = 'stats';
     const sidebarScroll = { stats: 0, settings: 0 };
+    function syncConversation() {
+      const id = window.sidecar?.conversationId ?? new URLSearchParams(location.search).get('conversationId') ?? '';
+      if (id !== conversationId) {
+        const switched = conversationId !== null;
+        conversationId = id;
+        conversationEpoch++;
+        lastData = null;
+        refreshFailures = sampleCount = 0;
+        healthCode = sampleCode = '';
+        if (sidebarView === 'stats') panel.setAttribute('data-context-pending', '');
+        if (switched) renderHealthNotice();
+      }
+      return id;
+    }
+    function replayStats() {
+      panel.toggleAttribute('data-context-pending', !lastData);
+      if (lastData) renderData(lastData);
+    }
     function selectSidebarView(view, focus = false) {
       if (view !== sidebarView) {
         sidebarScroll[sidebarView] = window.scrollY;
@@ -1822,8 +2079,10 @@ const UI_HTML = `<!DOCTYPE html>
           tab.tabIndex = selected ? 0 : -1;
           document.getElementById('sidebar-' + name).hidden = !selected;
         }
-        if (view === 'stats' && lastData) renderData(lastData);
-        if (view === 'settings') renderModelList();
+        if (view === 'stats') {
+          syncConversation();
+          replayStats();
+        }
         renderHealthNotice();
         window.scrollTo({ top: sidebarScroll[view], behavior: 'instant' });
       }
@@ -1845,7 +2104,8 @@ const UI_HTML = `<!DOCTYPE html>
     // The compact status bar is computed only while it is shown. Like the Cache row it repaints
     // when the pointer enters it, because its cache tooltip states an age.
     function paintStatusBar(d) {
-      if (prefs.compactTelemetryBar === true) presentation.renderTelemetryBar(document.querySelector('.panel'), d, d.generation, labels, prefs);
+      const generation = d.requestTimingAvailable === false ? null : d.generation;
+      if (prefs.compactTelemetryBar === true) presentation.renderTelemetryBar(document.querySelector('.panel'), d, generation, labels, prefs);
     }
     document.querySelector('[data-telemetry-bar]').addEventListener('mouseenter', () => {
       if (lastData) paintStatusBar(lastData);
@@ -1868,17 +2128,21 @@ const UI_HTML = `<!DOCTYPE html>
     document.addEventListener('keydown', event => {
       if (event.key === 'Escape') for (const setting of document.querySelectorAll('.metric-setting')) setting.dataset.helpDismissed = 'true';
     });
+    let expandModelList = false;
     function applySettings(next, forceInputs = false) {
       prefs = { ...prefs, ...next };
+      prefsSig = JSON.stringify(prefs);
       labels = presentation.apply(document.body, prefs);
       settingsLabels = presentation.dictionaries[prefs.settingsLanguage] || presentation.dictionaries['zh-CN'];
+      versionPanel.sync(prefs, settingsLabels);
       sidebarTabs.lang = prefs.settingsLanguage;
       sidebarTabs.setAttribute('aria-label', settingsLabels.sidebarNavigation);
       document.getElementById('sidebar-tab-stats').textContent = settingsLabels.sidebarStats;
       document.getElementById('sidebar-tab-settings').textContent = settingsLabels.sidebarSettings;
       document.getElementById('sidebar-stats').lang = document.body.dataset.language;
+      document.getElementById('sidebar-settings').lang = prefs.settingsLanguage;
       for (const select of document.querySelectorAll('.settings select[name]')) select.value = prefs[select.name];
-      for (const checkbox of document.querySelectorAll('.settings input[type="checkbox"]')) {
+      for (const checkbox of document.querySelectorAll('.settings input[type="checkbox"][name]')) {
         const checked = prefs[checkbox.name] === true;
         checkbox.checked = checked;
         const card = checkbox.closest('[data-setting-card]');
@@ -1906,13 +2170,22 @@ const UI_HTML = `<!DOCTYPE html>
       if (speedAnimCard) speedAnimCard.dataset.parentOff = String(prefs.showSpeed === false);
       const modelPickerCard = document.querySelector('[data-setting-card="modelEffortPicker"]');
       if (modelPickerCard) {
-        modelPickerCard.dataset.keepNative = String(prefs.keepNativeModelEntry !== false);
-        modelPickerCard.dataset.customizeModels = String(prefs.modelEffortPicker === true && prefs.customizeModelList === true);
+        modelPickerCard.dataset.hideModelTags = String(prefs.hideModelTags === true);
+        modelPickerCard.dataset.hideDefaultEffort = String(prefs.hideDefaultEffort === true);
+        modelPickerCard.dataset.effortBar = String(prefs.modelEffortPicker === true && prefs.showEffortBar === true);
+        modelPickerCard.dataset.customizeModels = String(prefs.modelEffortPicker === true && prefs.customizeModelList === true && expandModelList === true);
       }
-      for (const subKey of ['keepNativeModelEntry', 'hideModelTags', 'hideDefaultEffort', 'customizeModelList']) {
+      for (const subKey of ['hideModelTags', 'hideDefaultEffort', 'customizeModelList', 'showEffortBar']) {
         const subCard = document.querySelector('[data-setting-card="' + subKey + '"]');
         if (subCard) subCard.dataset.parentOff = String(prefs.modelEffortPicker !== true);
       }
+      const expandModelCard = document.querySelector('[data-setting-card="expandModelList"]');
+      if (expandModelCard) {
+        expandModelCard.dataset.checked = String(expandModelList === true);
+        expandModelCard.dataset.parentOff = String(prefs.modelEffortPicker !== true || prefs.customizeModelList !== true);
+      }
+      const expandModelInput = document.getElementById('setting-expand-model-list');
+      if (expandModelInput) expandModelInput.checked = expandModelList === true;
       renderModelList();
       for (const card of document.querySelectorAll('.setting-option-card[data-layout-key]')) card.dataset.layout = prefs[card.dataset.layoutKey] === 'rows' ? 'rows' : 'columns';
       const contextPreview = document.querySelector('[data-preview-group="context"]');
@@ -1933,18 +2206,22 @@ const UI_HTML = `<!DOCTYPE html>
         swatch.setAttribute('aria-label', name);
         swatch.removeAttribute('title');
       }
+      syncConversation();
       renderUsage();
-      if (lastData) renderData(lastData);
+      if (sidebarView === 'stats') replayStats();
+      if (lastData) renderHealthNotice();
     }
     applySettings(prefs);
     let panelLocked = false;
-    async function postApi(path, data = {}, signal) {
+    async function postApi(path, data = {}, signal, isCurrent) {
       const params = new URLSearchParams(window.location.search);
       const token = params.get('token') || window.sidecar?.token || '';
       const headers = { 'Content-Type': 'application/json' };
       if (token) headers['X-Sidecar-Token'] = token;
       const res = await (window.sidecar?.fetch || fetch)(path, { method: 'POST', redirect: 'error', signal, headers, body: JSON.stringify(data) });
-      if (res.status === 401 || res.status === 403) {
+      if (isCurrent && !isCurrent()) return null;
+      // Version actions report their own errors without locking statistics.
+      if (path !== '${VERSION_ROUTE}' && path !== '${UPDATE_ROUTE}' && (res.status === 401 || res.status === 403)) {
         panelLocked = true;
         document.querySelector('.sidebar-content').style.display = 'none';
         const notice = document.getElementById('panel-auth-notice');
@@ -1955,7 +2232,10 @@ const UI_HTML = `<!DOCTYPE html>
       return res;
     }
     let pendingPatch = null;
+    let savedUsageTouched = false;
+    function touchesUsageSetting(patch) { return patch != null && ('showUsageActivity' in patch || 'showModelUsage' in patch); }
     async function saveSettings(patch) {
+        if (touchesUsageSetting(patch)) savedUsageTouched = true;
         if (savingSettings) {
           pendingPatch = { ...(pendingPatch || {}), ...patch };
           settingsEpoch++;
@@ -1987,9 +2267,15 @@ const UI_HTML = `<!DOCTYPE html>
           applySettings(previous, true);
           if (!panelLocked) window.alert(settingsLabels.saveFailed);
         } finally {
+          const triggerUsage = savedUsageTouched;
+          savedUsageTouched = false;
           settingsEpoch++;
           savingSettings = false;
           updateControlState();
+          if (triggerUsage && usageEnabled()) {
+            usageDueAt = 0;
+            void refreshUsage();
+          }
         }
     }
     for (const select of document.querySelectorAll('.settings select[name], .settings input[name]')) {
@@ -2031,6 +2317,10 @@ const UI_HTML = `<!DOCTYPE html>
       });
     }
     var modelListSig = '';
+    function formatModelListName(name) {
+      const short = String(name || '').replace(/^(?:Gemini|Claude)\\s+/i, '').trim();
+      return short || String(name || '');
+    }
     function renderModelList() {
       const box = document.getElementById('setting-model-list');
       if (!box) return;
@@ -2052,16 +2342,24 @@ const UI_HTML = `<!DOCTYPE html>
       const disabled = savingSettings || prefs.modelEffortPicker !== true || prefs.customizeModelList !== true;
       for (const name of all) {
         const active = !hiddenSet.has(name);
+        const short = formatModelListName(name);
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'pv-swatch pv-model-item';
         btn.dataset.modelToggle = name;
         btn.dataset.active = String(active);
         btn.setAttribute('aria-pressed', String(active));
-        btn.disabled = disabled;
-        btn.textContent = name;
+        btn.textContent = short;
+        if (short !== name) btn.title = name;
         box.append(btn);
       }
+    }
+    const expandModelToggle = document.getElementById('setting-expand-model-list');
+    if (expandModelToggle) {
+      expandModelToggle.addEventListener('change', () => {
+        expandModelList = expandModelToggle.checked;
+        applySettings(prefs);
+      });
     }
     const modelListEl = document.getElementById('setting-model-list');
     if (modelListEl) {
@@ -2152,14 +2450,17 @@ const UI_HTML = `<!DOCTYPE html>
         if (prefs[key] !== value) void saveSettings({ [key]: value });
       });
     }
-    function renderQuota(groups) {
+    function renderQuota(groups, now) {
       const root = document.getElementById('quota-root');
-      const quotaGroups = presentation.quotaView(groups, prefs, labels);
+      const quotaGroups = presentation.quotaView(groups, prefs, labels, now);
+      const useBar = presentation.appearance(prefs).quotaIndicator === 'bar';
+      const sig = JSON.stringify([prefs.language, useBar, quotaGroups]);
+      if (sig === quotaSig) return;
       if (quotaGroups.length === 0) {
         root.replaceChildren();
+        quotaSig = sig;
         return;
       }
-      const useBar = presentation.appearance(prefs).quotaIndicator === 'bar';
       let html = '';
       for (const g of quotaGroups) {
         html += '<div class="quota-group">';
@@ -2180,21 +2481,28 @@ const UI_HTML = `<!DOCTYPE html>
       }
       root.innerHTML = html;
       presentation.applyQuotaTooltips(root, labels);
+      quotaSig = sig;
     }
 
     async function refresh() {
-      if (panelLocked || refreshing) return;
+      if (panelLocked) return;
+      const convId = syncConversation();
+      if (refreshing) return;
       refreshing = true;
       const requestedSettingsEpoch = settingsEpoch;
+      const requestedConversationEpoch = conversationEpoch;
+      const isCurrent = () => {
+        syncConversation();
+        return requestedConversationEpoch === conversationEpoch;
+      };
       // The usage history keeps its own, slower pace and never holds up this poll.
       void refreshUsage();
       try {
-        const urlParams = new URLSearchParams(window.location.search);
-        const convId = window.sidecar?.conversationId || urlParams.get('conversationId') || '';
-        const res = await postApi('/api/context', { conversationId: convId }, AbortSignal.timeout(6000));
+        const res = await postApi('/api/context', { conversationId: convId }, AbortSignal.timeout(6000), isCurrent);
+        if (!res) return;
         const d = await res.json();
+        if (!isCurrent() || panelLocked) return;
         if (!d || d.error) throw new Error('Context unavailable');
-        if (panelLocked) return;
         if (d.uiVersion && d.uiVersion !== ${PANEL_VERSION}) {
           window.location.reload();
           return;
@@ -2208,12 +2516,18 @@ const UI_HTML = `<!DOCTYPE html>
         sampleCode = code;
         // F3/F4 and S4 already have thresholds in the backend.
         healthCode = code === healthCode || sampleCount >= 2 || !['S3', 'F1', 'F2'].includes(code) ? code : '';
-        // Settings are re-applied only when they changed; renderData skips an unchanged snapshot itself.
-        const prefsChanged = JSON.stringify({ ...prefs, ...d.prefs }) !== JSON.stringify(prefs);
-        if (prefsChanged && !savingSettings && requestedSettingsEpoch === settingsEpoch) applySettings(d.prefs);
-        else renderData(d);
+        const nextPrefs = { ...prefs, ...d.prefs };
+        if (!savingSettings && requestedSettingsEpoch === settingsEpoch && JSON.stringify(nextPrefs) !== prefsSig) {
+          applySettings(nextPrefs);
+        } else {
+          // The settings tab still needs the model catalog and health updates.
+          renderModelList();
+          if (sidebarView === 'stats') replayStats();
+          renderHealthNotice();
+        }
+        if (!savingSettings && requestedSettingsEpoch === settingsEpoch) void versionPanel.checkAutomatically();
       } catch {
-        if (!panelLocked) {
+        if (!panelLocked && isCurrent()) {
           refreshFailures++;
           sampleCount = 0;
           renderHealthNotice();
@@ -2221,41 +2535,22 @@ const UI_HTML = `<!DOCTYPE html>
       } finally { refreshing = false; }
     }
 
-    // The expiry ring or bar advances with the clock, so it is painted on its own. The DOM
-    // serializes SVG differently, hence the comparison with the last write.
-    function paintCacheIndicator(cache) {
-      if (cacheIconSvg !== cache.iconSvg) document.getElementById('dot-cached').innerHTML = cacheIconSvg = cache.iconSvg;
-      const cacheMeterEl = document.getElementById('cache-meter');
-      const cacheMeterFillEl = document.getElementById('cache-meter-fill');
-      if (!cacheMeterEl || !cacheMeterFillEl) return;
-      const hidden = cache.indicator !== 'bar';
-      if (cacheMeterEl.hidden !== hidden) cacheMeterEl.hidden = hidden;
-      if (hidden) return;
-      cacheMeterFillEl.style.width = cache.progressPct;
-      cacheMeterFillEl.style.backgroundColor = cache.progressColor;
-    }
-
     function renderData(d) {
-        // The notice follows the health samples, which can change under an unchanged snapshot.
-        renderHealthNotice();
-        // Statistics hidden behind the settings tab are not refreshed; they catch up when it is left.
-        if (sidebarView !== 'stats') {
-          renderModelList();
-          return;
-        }
-        const cache = presentation.cacheView(d, prefs);
-        paintCacheIndicator(cache);
-        // Everything else is repainted only when the snapshot, the settings or a clock-driven text
-        // changed: the cache state, a reset countdown or a running turn's elapsed time.
-        const { iconSvg, progress, progressPct, progressColor, ...cacheState } = cache;
-        const key = JSON.stringify([d, prefs, cacheState, presentation.quotaView(d.quotaGroups, prefs, labels), d.turnMetrics && presentation.turnMetricsText(d.turnMetrics).elapsed]);
-        if (key === renderedKey) return;
-        renderedKey = key;
-        presentation.renderContextTooltips(document.querySelector('.panel'), d, labels);
-        presentation.renderAlerts(document.body, d, prefs, labels);
-        presentation.renderGeneration(document.querySelector('.panel'), d.generation, labels, prefs);
-        presentation.renderTurnMetrics(document.querySelector('.panel'), d.turnMetrics, labels, prefs);
-        paintStatusBar(d);
+      const now = Date.now();
+      const generation = d.requestTimingAvailable === false ? null : d.generation;
+      // Time can change what is shown even when the response is identical.
+      const alert = presentation.alertView(d, prefs, labels, now);
+      const elapsed = prefs.showTurnMetrics && d.turnMetrics
+        ? presentation.turnMetricsText(d.turnMetrics, labels, now).elapsed : '';
+      const sig = JSON.stringify([prefsSig, d.contextTokens, d.maxContextTokens, d.cachedIn, d.uncachedIn,
+        d.turn0Tokens, d.totalOutputTokens, d.totalThinkingTokens, generation, d.turnMetrics,
+        alert.contextTone, alert.contextTip, elapsed]);
+      const statsChanged = sig !== statsSig;
+      if (statsChanged) {
+        presentation.renderContextTooltips(panel, d, labels);
+        presentation.renderAlerts(document.body, d, prefs, labels, now);
+        presentation.renderGeneration(panel, generation, labels, prefs);
+        presentation.renderTurnMetrics(panel, d.turnMetrics, labels, prefs, now);
         const ctx = presentation.contextBreakdown(d);
 
         document.getElementById('used-pct').textContent = ctx.usedPct;
@@ -2266,25 +2561,6 @@ const UI_HTML = `<!DOCTYPE html>
         document.getElementById('seg-think').style.width = ctx.segThinkW;
         document.getElementById('seg-turn0').style.width = ctx.segTurn0W;
 
-        const valCacheHitEl = document.getElementById('val-cache-hit');
-        const valCacheHitKEl = document.getElementById('val-cache-hit-k');
-        valCacheHitEl.style.color = cache.valColor;
-        valCacheHitEl.style.textDecoration = cache.valDeco;
-        valCacheHitEl.style.opacity = cache.valOp;
-        valCacheHitEl.textContent = cache.text;
-        if (valCacheHitKEl) {
-          valCacheHitKEl.style.color = cache.valColor || 'var(--muted-foreground, #8e8e93)';
-          valCacheHitKEl.textContent = cache.countdown;
-        }
-        // The hit-rate ring stands for the number, so it takes the number's color and dimming.
-        const cacheHitRingEl = document.getElementById('cache-hit-ring');
-        if (cacheHitRingEl) {
-          cacheHitRingEl.innerHTML = cache.hitRingSvg;
-          cacheHitRingEl.style.color = cache.valColor;
-          cacheHitRingEl.style.opacity = cache.valOp;
-        }
-        document.getElementById('row-cached').title = presentation.cacheTooltip(d, labels, Date.now(), prefs);
-
         document.getElementById('val-turn0-k').textContent = ctx.turn0K;
         document.getElementById('val-read-k').textContent = ctx.readK;
         document.getElementById('val-think-k').textContent = ctx.thinkK;
@@ -2293,8 +2569,51 @@ const UI_HTML = `<!DOCTYPE html>
         document.getElementById('val-read-pct').textContent = ctx.readPct;
         document.getElementById('val-think-pct').textContent = ctx.thinkPct;
         document.getElementById('val-out-pct').textContent = ctx.outPct;
+        statsSig = sig;
+      }
+      const cacheChanged = renderCache(d, now);
+      if (statsChanged || cacheChanged) paintStatusBar(d);
+      renderQuota(d.quotaGroups, now);
+    }
 
-        renderQuota(d.quotaGroups);
+    function renderCache(d, now) {
+      const cache = presentation.cacheView(d, prefs, now);
+      const title = presentation.cacheTooltip(d, labels, now, prefs);
+      const dotCachedEl = document.getElementById('dot-cached');
+      const cacheMeterEl = document.getElementById('cache-meter');
+      const cacheMeterFillEl = document.getElementById('cache-meter-fill');
+      if (dotCachedEl && dotCachedEl._svg !== cache.iconSvg) dotCachedEl.innerHTML = dotCachedEl._svg = cache.iconSvg;
+      if (cacheMeterEl && cacheMeterFillEl) {
+        const hidden = cache.indicator !== 'bar';
+        if (cacheMeterEl.hidden !== hidden) cacheMeterEl.hidden = hidden;
+        if (!hidden) {
+          if (cacheMeterFillEl.style.width !== cache.progressPct) cacheMeterFillEl.style.width = cache.progressPct;
+          if (cacheMeterFillEl.style.backgroundColor !== cache.progressColor) cacheMeterFillEl.style.backgroundColor = cache.progressColor;
+        }
+      }
+      const sig = JSON.stringify([cache.indicator, cache.hitRingSvg, cache.valColor, cache.valDeco,
+        cache.valOp, cache.text, cache.countdown, title]);
+      if (sig === cacheSig) return false;
+      const valCacheHitEl = document.getElementById('val-cache-hit');
+      const valCacheHitKEl = document.getElementById('val-cache-hit-k');
+      valCacheHitEl.style.color = cache.valColor;
+      valCacheHitEl.style.textDecoration = cache.valDeco;
+      valCacheHitEl.style.opacity = cache.valOp;
+      valCacheHitEl.textContent = cache.text;
+      if (valCacheHitKEl) {
+        valCacheHitKEl.style.color = cache.valColor || 'var(--muted-foreground, #8e8e93)';
+        valCacheHitKEl.textContent = cache.countdown;
+      }
+      // The hit-rate ring stands for the number, so it takes the number's color and dimming.
+      const cacheHitRingEl = document.getElementById('cache-hit-ring');
+      if (cacheHitRingEl) {
+        cacheHitRingEl.innerHTML = cache.hitRingSvg;
+        cacheHitRingEl.style.color = cache.valColor;
+        cacheHitRingEl.style.opacity = cache.valOp;
+      }
+      document.getElementById('row-cached').title = title;
+      cacheSig = sig;
+      return true;
     }
 
     // Shown on both tabs; text follows the open tab's language.
@@ -2397,8 +2716,9 @@ const UI_HTML = `<!DOCTYPE html>
         const detailPop = control.closest('.pv-detail-pop');
         const modelCard = control.closest('.setting-model-card');
         const parentDisabled = (control.name === 'speedAnimation' && prefs.showSpeed === false)
-          || (['keepNativeModelEntry', 'hideModelTags', 'hideDefaultEffort', 'customizeModelList'].includes(control.name) && prefs.modelEffortPicker !== true)
-          || (!!modelCard && !control.closest('.setting-pair-item') && (prefs.modelEffortPicker !== true || prefs.customizeModelList !== true))
+          || (['hideModelTags', 'hideDefaultEffort', 'customizeModelList', 'showEffortBar'].includes(control.name) && prefs.modelEffortPicker !== true)
+          || (control.dataset.uiToggle === 'expandModelList' && (prefs.modelEffortPicker !== true || prefs.customizeModelList !== true))
+          || (!!modelCard && !control.closest('.setting-pair-item') && (prefs.modelEffortPicker !== true || prefs.customizeModelList !== true || !expandModelList))
           || (!!optionCard && !control.closest('.setting-pair-item') && optionCard.dataset.checked === 'false')
           || (!!thresholdCard && !control.closest('.setting-pair-item') && thresholdCard.dataset.checked === 'false')
           || (!!detailPop && detailPop.dataset.open === 'false');
@@ -2411,7 +2731,8 @@ const UI_HTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
-export { inspectConversation, inspectUsage, UI_HTML, parseGenRow, readConversationSnapshot, readConversationUsage };
+const rememberCloudTelemetry = cloudTelemetryStore.set;
+export { inspectConversation, inspectUsage, UI_HTML, parseGenRow, parseUsageRow, readConversationSnapshot, readConversationUsage, rememberCloudTelemetry };
 
 const isMain = (() => {
   try {
@@ -2440,16 +2761,20 @@ export async function startPanel(loadSdk = () => import('sidecar_sdk'), env = pr
     body: JSON.stringify({ uiVersion: PANEL_VERSION }) }), 'GET');
   app.api('/api/context', async (data) => {
     const deckCdp = deckInjector?.status?.() ?? 'unknown';
-    const conversationId = data?.conversationId || app.config.conversationId;
+    // Full View changes the sidecar's conversation; opening a child tab
+    // beside its parent does not. Neither should depend on the last CDP footer.
+    const conversationId = data?.conversationId ?? app.config?.conversationId ?? '';
     return {
-      ...await inspectConversation(conversationId),
+      ...await readSelectedConversation(conversationId, false),
       deckCdp,
       deckCdpInfo: cdpNotice.info(deckCdp),
       availableModels: deckInjector?.models?.(conversationId) ?? [],
     };
   }, 'POST');
+  app.api('/api/usage', (data) => inspectUsage(settingsStore.read(), data?.conversationId ?? app.config?.conversationId ?? ''), 'POST');
   app.api('/api/settings', (data) => settingsStore.update(data), 'POST');
-  app.api('/api/usage', () => inspectUsage(), 'POST');
+  app.api(VERSION_ROUTE, data => checkVersion(data?.mode), 'POST');
+  app.api(UPDATE_ROUTE, data => updatePlugin(data?.version), 'POST');
   app.api('/api/fix-cdp-shortcut', () => cdpNotice.fixShortcuts(), 'POST');
   const ready = app.run();
   installAsyncHostRoutes(app);
@@ -2459,6 +2784,8 @@ export async function startPanel(loadSdk = () => import('sidecar_sdk'), env = pr
 if (isMain && (process.env.ANTIGRAVITY_LS_ADDRESS || process.env.ANTIGRAVITY_SIDECAR_WEB_PORT)) {
   const injector = deckInjector = startDeckInjector(inspectConversation, {
     productRoots: conversationDirs.map(dir => dirname(dir)),
+    needsCloudTelemetry: convId => !resolveConversationDb(convId, false),
+    onCloudTelemetry: rememberCloudTelemetry,
     onStatus: state => cdpNotice.observe(state),
   });
   let stopping = false;

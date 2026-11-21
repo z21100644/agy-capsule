@@ -41,6 +41,15 @@ export function createStubDom({ page = false } = {}) {
       getAttribute: name => attributes.get(name) ?? null,
       setAttribute(name, value) { dom.writes++; attributes.set(name, String(value)); },
       removeAttribute(name) { dom.writes++; attributes.delete(name); },
+      toggleAttribute(name, force) {
+        const next = force === undefined ? !attributes.has(name) : Boolean(force);
+        if (next !== attributes.has(name)) {
+          dom.writes++;
+          if (next) attributes.set(name, '');
+          else attributes.delete(name);
+        }
+        return next;
+      },
       matches: () => false,
       querySelector(selector) {
         const testId = /\[data-testid="([^"]+)"\]/.exec(selector)?.[1];
@@ -55,7 +64,20 @@ export function createStubDom({ page = false } = {}) {
         return (inTree || el.innerHTML) && !selector.includes(':hover') ? standIn(selector) : null;
       },
       querySelectorAll: () => [],
-      closest: selector => (inTree ? standIn('closest ' + selector) : null),
+      closest(selector) {
+        const specs = selector.split(',').map(s => s.trim()).filter(Boolean);
+        for (let n = el; n; n = n.parentElement) {
+          for (const part of specs) {
+            const mVal = /^\[([^=\]]+)="([^"]*)"\]$/.exec(part);
+            if (mVal && n.getAttribute(mVal[1]) === mVal[2]) return n;
+            const mAttr = /^\[([^=\]]+)\]$/.exec(part);
+            if (mAttr && n.hasAttribute(mAttr[1])) return n;
+            const mCls = /^\.([^\s.[]+)$/.exec(part);
+            if (mCls && n.classList.contains(mCls[1])) return n;
+          }
+        }
+        return inTree ? standIn('closest ' + selector) : null;
+      },
       contains(node) { for (let n = node; n; n = n.parentElement) if (n === el) return true; return false; },
       appendChild(child) {
         child.remove();
@@ -123,7 +145,7 @@ export function createStubDom({ page = false } = {}) {
     createElement: tagName => element(tagName),
     getElementById: id => (page ? body.querySelector('#' + id) : attached.get(id) ?? null),
     querySelector: selector => body.querySelector(selector),
-    querySelectorAll: () => (page ? [] : dom.footers),
+    querySelectorAll: selector => (!page && String(selector || '').includes('agy-composer-footer') ? dom.footers : []),
     addEventListener() {}, removeEventListener() {},
   };
   // The page globals the scripts read. Timers are captured so a test drives each tick itself.
