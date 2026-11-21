@@ -66,6 +66,52 @@ test('2.33.0 selector context passes the exact host option object and ignores di
   assert.equal(newChat.selected, 'Gemini 4 Neon (High)');
 });
 
+test('merged Orchestrator selects a planner separately, even when it shares a standalone model', () => {
+  const { leaf, owner, contextValue, current, target, calls } = selectorHost('conv-orchestrator');
+  current.modelId = 'gemini-4-neon-high';
+  target.modelId = 'gemini-4-argon-high';
+  const neon = { label: 'Orchestrator (Neon)', value: 1537, modelId: 'gemini-pro-orchestrator-neon', tagTitle: 'New' };
+  const argon = { label: 'Orchestrator (Argon)', value: 1668, modelId: 'gemini-pro-orchestrator-g1-pro' };
+  const neonLow = { label: 'Gemini 4 Neon (Low)', value: 1534 };
+  const disabled = { label: 'Gemini 4 Neon (XHigh)', value: 1535, disabled: true };
+  const picks = [];
+  const pick = { model: 0, select: value => picks.push(value) };
+  Object.assign(contextValue, {
+    modelOptions: [current, neonLow, { ...disabled, disabled: false }, neon, argon, target],
+    groups: [{ options: [current, neon, target] }],
+    orchestratorPlanners: [current, neonLow, disabled, target],
+    orchestratorDefaultPlanner: current,
+    orchestratorPick: pick,
+  });
+  owner.return = { memoizedProps: { value: {
+    onDidChange() {},
+    getState: () => ({ getPrefValue: key => key === 'orchestratorModel' ? neonLow.value : undefined }),
+  } } };
+  const read = () => readPickerState({ __reactFiber$test: leaf });
+  const state = read();
+  assert.deepEqual(state.families, ['Gemini 4 Neon', 'Orchestrator', target.label]);
+  assert.deepEqual(state.orchestrator.planners.map(group => group.name), ['Gemini 4 Neon', 'Gemini 4 Argon']);
+  assert.deepEqual(state.orchestrator.planners[0].items.map(item => item.tier), ['High', 'Low']);
+  assert.equal(state.orchestrator.active, false);
+  assert.equal(state.orchestrator.current, 'Orchestrator → Gemini 4 Neon (Low)');
+  assert.equal(state.orchestrator.targets[current.label], 'Orchestrator → ' + current.label);
+  assert.equal(state.orchestrator.targets[disabled.label], undefined, 'a tier available standalone may not be available to Orchestrator');
+  state.choose(target.label);
+  state.choose('Orchestrator → Gemini 4 Neon (XHigh)');
+  state.choose('Orchestrator → ' + target.label);
+  assert.deepEqual(calls, [target, neon]);
+  assert.deepEqual(picks, [target.value]);
+
+  contextValue.selectedModel = argon;
+  pick.model = target.value;
+  const active = read();
+  assert.equal(active.selected, 'Orchestrator → ' + target.label);
+  assert.equal(active.orchestrator.standalone, target.label);
+  active.choose('Orchestrator → ' + neonLow.label);
+  assert.equal(picks.at(-1), 0, 'the configured default clears the conversation override');
+  assert.equal(calls.at(-1), argon, 'keep the active Orchestrator model rather than selecting the planner standalone');
+});
+
 test('missing conversation, selector, or matching selection leaves control to the native picker', () => {
   assert.equal(readPickerState({}), null);
   assert.equal(readPickerState({ __reactFiber$test: host(null).leaf }), null);

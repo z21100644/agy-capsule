@@ -66,7 +66,7 @@ When enabled, seamlessly replaces the native composer footer model button in pla
 
 ☑ **Customize models**: Expands the list of models discovered from the host so you can toggle individual models on or off (at least one model always remains visible).
 
-☑ **Effort bar**: Keeps the menu open when you switch models and replaces hover submenus with a slider. Click, use the arrow keys, or drag across a tier to switch immediately. Right-click the slider to change animation, tick marks, or the Codex / Claude style. Turn it off to restore hover submenus.
+☑ **Effort bar**: Keeps the menu open when you switch models and replaces hover submenus with a slider. Click or use the arrow keys to switch tiers immediately. Drag to preview tiers, then release to apply the selection. Right-click the slider to change animation, tick marks, or the Codex / Claude style. Turn it off to restore hover submenus.
 
 ## Usage history
 

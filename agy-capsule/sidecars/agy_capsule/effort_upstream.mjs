@@ -1,6 +1,7 @@
 // Slider UI and motion engine adapted from LLYSH-HANNARI/antigravity-Codex-Claude-effort-slider.
 // Copyright (c) 2026 月上寒. MIT; see ../../THIRD-PARTY-NOTICES.md.
 // Upstream c45c3fccaba43d238bce22d5023d7233e4be5ec1, lib/client.js (UI only).
+// Animation replay and canvas geometry optimizations adapted from upstream 70ebd41.
 
 export function createUpstreamEffort() {
   var globalRoot = globalThis;
@@ -246,7 +247,7 @@ export function createUpstreamEffort() {
 
   /**
    * 迟滞棘轮分档器（Hysteresis Detent）：
-   * - 向新档位方向推进过 1/3 格宽即刻触发跳档，保证「拖过边界立即切档」的轻快手感；
+   * - 向新档位方向推进过 1/3 格宽即刻预览下一档；
    * - 往回退则需要退过 2/3 格宽（留出 [1/3, 2/3] 迟滞带），防止手指停在边界附近时左右抖动。
    */
   function detentTargetIndex(currentIndex, ptrPct, count) {
@@ -534,6 +535,18 @@ export function createUpstreamEffort() {
       return luminance < 0.5;
     } catch (err) {
       return true;
+    }
+  }
+
+  function replayCssAnimations(el, classes, names, includeSubtree = false) {
+    var alreadyActive = el.classList.contains(classes[0]);
+    el.classList.add(...classes);
+    if (!alreadyActive) return;
+    var animations = el.getAnimations?.({ subtree: includeSubtree }) ?? [];
+    for (var animation of animations) {
+      if (!names.includes(animation.animationName)) continue;
+      animation.currentTime = 0;
+      animation.play();
     }
   }
 
@@ -1021,7 +1034,7 @@ export function createUpstreamEffort() {
     claudeCanvasEl.className = "ces-claude-canvas";
     claudeCanvasEl.setAttribute("data-ces-part", "claude-canvas");
     claudeCanvasEl.width = 280;
-    claudeCanvasEl.height = 28;
+    claudeCanvasEl.height = TRACK_HEIGHT;
     trackEl.appendChild(claudeCanvasEl);
 
     var knobEl = doc.createElement("div");
@@ -1047,9 +1060,23 @@ export function createUpstreamEffort() {
     // 这样拖动中速度连续变化时波纹不会因倍率突变而跳帧/倒退
     var claudeFlowTime = 0;
     var claudeLastTs = 0;
-    // 当前位置对应的强度与速度（由 applyVisualPct 每次刷新，RAF 循环读取）
+    // applyVisualPct 提供绘制状态，ResizeObserver 提供尺寸；绘制帧无需读取档位快照。
     var claudeIntensity = 0;
     var claudeSpeed = 0;
+    var claudeFill = 0;
+    var claudeTrackWidth = claudeCanvasEl.width;
+    var claudeTrackHeight = claudeCanvasEl.height;
+    var claudeThemeCheckedAt = -Infinity;
+    var claudeIsDark = true;
+    var claudeContext;
+    var trackResizeObserver = typeof win?.ResizeObserver === "function"
+      ? new win.ResizeObserver(function (entries) {
+          if (destroyed) return;
+          var rect = entries[0].contentRect;
+          if (rememberClaudeTrackSize(rect) && claudeIntensity > 0) startClaudeCanvasAnimation();
+        })
+      : null;
+    trackResizeObserver?.observe(trackEl);
 
     var dragging = false;
     var buttonDown = false;
@@ -1057,7 +1084,7 @@ export function createUpstreamEffort() {
     var draftIndex = null;
     var snapIndex = null;
     var detentIndex = -1;
-    var lastCommittedIndex = -1;
+    var lastShownMax = null;
 
     var lastPtrPct = null;
     var lastPtrMs = 0;
@@ -1143,6 +1170,13 @@ export function createUpstreamEffort() {
       var label = levelItem ? levelItem.label : "";
       var isMax = snap.visualMax || (!snap.locked && count > 1 && safeIdx === count - 1 && !isOffLevel(label));
 
+      // Preview the same max-tier effect on drag, tap, and keyboard changes.
+      if (lastShownMax !== null && isMax !== lastShownMax) {
+        if (isMax) triggerMaxEffects(snap.isClaude);
+        else clearMaxEffects();
+      }
+      lastShownMax = isMax;
+
       var rowEl =
         opts.row ||
         (container.closest &&
@@ -1173,11 +1207,7 @@ export function createUpstreamEffort() {
               clearTimeout(valEl.__cesRiseTimer);
               valEl.__cesRiseTimer = null;
             }
-            valEl.classList.remove("ces-text-rise");
-            valEl.classList.remove("is-claude-changing");
-            void valEl.offsetWidth;
-            valEl.classList.add("ces-text-rise");
-            valEl.classList.add("is-claude-changing");
+            replayCssAnimations(valEl, ["ces-text-rise", "is-claude-changing"], ["ces-claude-rise"]);
             valEl.__cesRiseTimer = setTimeout(function () {
               if (valEl && valEl.classList) {
                 valEl.classList.remove("ces-text-rise");
@@ -1256,36 +1286,40 @@ export function createUpstreamEffort() {
       claudeRafId = null;
     }
 
+    function rememberClaudeTrackSize(rect) {
+      if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+      var height = Math.round(rect.height);
+      if (rect.width === claudeTrackWidth && height === claudeTrackHeight) return false;
+      claudeTrackWidth = rect.width;
+      claudeTrackHeight = height;
+      return true;
+    }
+
     function stepClaudeCanvas(nowTs) {
       claudeRafId = null;
-      if (destroyed) return;
-      var snap = readSeatSnapshot();
-      // 强度归零（回到 Low / 切走 Claude / 锁定）即停止循环，零冗余开销
-      if (!snap.isClaude || claudeIntensity <= 0) {
-        stopClaudeCanvasAnimation();
-        return;
-      }
+      if (destroyed || claudeIntensity <= 0) return;
       var now = typeof nowTs === "number" && nowTs > 0 ? nowTs : nowMs();
       var elapsed = Math.max(0, now - claudeAnimStart);
-      var progress = prefersReducedMotion(win) ? 1 : Math.min(1, elapsed / CLAUDE_SWEEP_MS);
+      var reducedMotion = prefersReducedMotion(win);
+      var progress = reducedMotion ? 1 : Math.min(1, elapsed / CLAUDE_SWEEP_MS);
       // 相位按帧累加：dt 上限 50ms，防止切后台回来后一次性跳很远
       var frameDt = claudeLastTs > 0 ? Math.min(0.05, Math.max(0, (now - claudeLastTs) / 1000)) : 0;
       claudeLastTs = now;
       claudeFlowTime += frameDt * claudeSpeed;
-      var isDark = surfaceIsDark(win, doc);
-      var rect = trackEl.getBoundingClientRect ? trackEl.getBoundingClientRect() : null;
-      var trackW = rect && rect.width > 0 ? rect.width : 280;
-      var th = rect && rect.height > 0 ? Math.round(rect.height) : (claudeCanvasEl.height || 28);
-      // 画布像素宽度 = 已填充宽度（圆钮中心），与 CSS width: var(--ces-fill) 对齐
-      var curPct = snap.visualMax ? 1 : motionState ? clamp01(motionState.x) : 0;
-      var tw = Math.max(1, Math.round(KNOB_RADIUS + (trackW - KNOB_RADIUS * 2) * curPct));
-      if (claudeCanvasEl.width !== tw) claudeCanvasEl.width = tw;
-      if (claudeCanvasEl.height !== th) claudeCanvasEl.height = th;
-      var cctx = claudeCanvasEl.getContext && claudeCanvasEl.getContext("2d");
-      if (cctx) {
-        paintDither(cctx, tw, th, isDark, progress, claudeFlowTime, claudeIntensity);
+      if (now - claudeThemeCheckedAt >= 500) {
+        claudeIsDark = surfaceIsDark(win, doc);
+        claudeThemeCheckedAt = now;
       }
-      if (!prefersReducedMotion(win) && win && typeof win.requestAnimationFrame === "function") {
+      if (!trackResizeObserver) rememberClaudeTrackSize(trackEl.getBoundingClientRect?.());
+      // 画布像素宽度 = 已填充宽度（圆钮中心），与 CSS width: var(--ces-fill) 对齐
+      var tw = Math.max(1, Math.round(KNOB_RADIUS + (claudeTrackWidth - KNOB_RADIUS * 2) * claudeFill));
+      if (claudeCanvasEl.width !== tw) claudeCanvasEl.width = tw;
+      if (claudeCanvasEl.height !== claudeTrackHeight) claudeCanvasEl.height = claudeTrackHeight;
+      if (claudeContext === undefined) claudeContext = claudeCanvasEl.getContext?.("2d") ?? null;
+      if (claudeContext) {
+        paintDither(claudeContext, tw, claudeTrackHeight, claudeIsDark, progress, claudeFlowTime, claudeIntensity);
+      }
+      if (!reducedMotion && win && typeof win.requestAnimationFrame === "function") {
         claudeRafId = win.requestAnimationFrame(stepClaudeCanvas);
       }
     }
@@ -1348,12 +1382,14 @@ export function createUpstreamEffort() {
       var animateTrack = !snap.locked || snap.visualMax;
       claudeIntensity = snap.isClaude && animateTrack ? claudeIntensityFor(p, snap.energyStart) : 0;
       claudeSpeed = claudeSpeedFor(p, snap.energyStart);
+      claudeFill = p;
       if (claudeIntensity > 0) {
         if (claudeCanvasEl.style.display !== "block") {
           // 仅「无特效 → 有特效」时重置入场扫掠；之后拖动只调强度/速度，不重播
           claudeCanvasEl.style.display = "block";
           claudeAnimStart = nowMs();
           claudeLastTs = 0;
+          claudeThemeCheckedAt = -Infinity;
         }
         startClaudeCanvasAnimation();
       } else {
@@ -1467,9 +1503,7 @@ export function createUpstreamEffort() {
         if (valEl.style && typeof valEl.style.setProperty === "function") {
           valEl.style.setProperty("--ces-glow-color", glowColor);
         }
-        valEl.classList.remove("is-glowing");
-        void valEl.offsetWidth;
-        valEl.classList.add("is-glowing");
+        replayCssAnimations(valEl, ["is-glowing"], ["ces-text-bloom", "ces-glow-flash"], true);
         if (valEl.__cesGlowTimer) {
           clearTimeout(valEl.__cesGlowTimer);
         }
@@ -1480,27 +1514,12 @@ export function createUpstreamEffort() {
       }
     }
 
-    /**
-     * 立即把目标档位写回宿主（Antigravity React Fiber 或 Seat）：
-     * 拖过档位边界时同步触发，无需等待 pointerup 松手。
-     */
     function commitAtIndex(targetIndex, reason) {
       var snap = readSeatSnapshot();
       if (snap.locked || snap.count <= 1) return;
       var clampedIdx = Math.max(0, Math.min(snap.count - 1, targetIndex));
       var item = snap.levels[clampedIdx];
       if (!item) return;
-
-      var isNowMax = clampedIdx === snap.count - 1 && !isOffLevel(item.label);
-      var wasMax = lastCommittedIndex === snap.count - 1;
-
-      lastCommittedIndex = clampedIdx;
-
-      if (isNowMax && !wasMax) {
-        triggerMaxEffects(snap.isClaude);
-      } else if (!isNowMax && wasMax) {
-        clearMaxEffects();
-      }
 
       if (seat && typeof seat.selectEffort === "function") {
         try {
@@ -1510,7 +1529,7 @@ export function createUpstreamEffort() {
       }
       if (typeof opts.onCommit === "function") {
         try {
-          opts.onCommit(item, clampedIdx, reason || "drag");
+          opts.onCommit(item, clampedIdx, reason);
         } catch (err) {
           // 忽略外部回调异常
         }
@@ -1579,21 +1598,15 @@ export function createUpstreamEffort() {
       var m = ensureMotion(snap);
       m.target = targetPct;
 
-      // ★ 核心交互：只要滑过档位边界（或者点击了另一档位），不用等松手，立即切换官方真实档位 ★
-      if (nowIndex !== lastCommittedIndex) {
-        commitAtIndex(nowIndex, isInitialDown ? "down" : "drag");
-      }
-
-      // ★ 顺滑连续跟手：拖动中圆钮直接 1:1 跟随鼠标连续浮点位置，不卡顿、不硬吸附 ★
-      // 松手（endDrag）时再以 ~100ms 轻快阻尼磁吸至最终离散档位圆心
+      // Keep the knob and tier effects under the pointer without writing to the host.
       m.x = targetPct;
       m.v = 0;
       m.a = 0;
       stopFrames();
-      applyVisualPct(readSeatSnapshot(), m.x, nowIndex);
+      applyVisualPct(snap, m.x, nowIndex);
     }
 
-    function endDrag(clientX) {
+    function endDrag(clientX, cancelled = false) {
       if (!dragging) return;
       var snap = readSeatSnapshot();
       var ptrPct = draftPct !== null ? draftPct : pctFromIndex(snap.officialIndex, snap.count);
@@ -1604,7 +1617,9 @@ export function createUpstreamEffort() {
 
       var mode = motionMode(win, activeSettings);
       var finalIndex;
-      if (mode === "fast") {
+      if (cancelled) {
+        finalIndex = snap.officialIndex;
+      } else if (mode === "fast") {
         var baseDetent = detentIndex >= 0 && detentIndex < snap.count ? detentIndex : snap.officialIndex;
         finalIndex = detentTargetIndex(baseDetent, ptrPct, snap.count);
       } else if (mode === "quick") {
@@ -1623,7 +1638,7 @@ export function createUpstreamEffort() {
       ptrSpeed = 0;
       snapIndex = finalIndex;
 
-      if (finalIndex !== lastCommittedIndex) {
+      if (!cancelled && finalIndex !== snap.officialIndex) {
         commitAtIndex(finalIndex, "release");
       }
 
@@ -1660,8 +1675,6 @@ export function createUpstreamEffort() {
 
       dragging = true;
       buttonDown = true;
-      // 起手时对齐当前官方档位，若起手点就在当前档位则不重复触发无意义的写入；若点在其他档位则立即切过去
-      lastCommittedIndex = snap.officialIndex;
       detentIndex = snap.officialIndex;
       snapIndex = null;
       lastPtrPct = null;
@@ -1687,7 +1700,7 @@ export function createUpstreamEffort() {
     function onPointerUp(ev) {
       if (!dragging) return;
       swallowEvent(ev);
-      buttonDown = false;
+      endDrag(ev && typeof ev.clientX === "number" ? ev.clientX : undefined);
       try {
         if (trackEl.releasePointerCapture && ev && ev.pointerId !== undefined) {
           trackEl.releasePointerCapture(ev.pointerId);
@@ -1695,14 +1708,12 @@ export function createUpstreamEffort() {
       } catch (err) {
         // 忽略释放失败
       }
-      endDrag(ev && typeof ev.clientX === "number" ? ev.clientX : undefined);
     }
 
     function onPointerCancel(ev) {
       if (!dragging) return;
       swallowEvent(ev);
-      buttonDown = false;
-      endDrag(undefined);
+      endDrag(undefined, true);
     }
 
     function onKeyDown(ev) {
@@ -1808,6 +1819,7 @@ export function createUpstreamEffort() {
         destroyed = true;
         stopFrames();
         stopClaudeCanvasAnimation();
+        trackResizeObserver?.disconnect();
         clearMaxEffects();
         var valEl = opts.valueElement;
         if (valEl && valEl.__cesRiseTimer) {
@@ -2061,12 +2073,12 @@ export const UPSTREAM_EFFORT_CSS = `
 }
 .ces-ag-effort-value.is-claude-changing,
 .ces-ag-effort-value.ces-text-rise {
-  animation: ces-claude-rise 0.3s cubic-bezier(0.2, 0.85, 0.25, 1);
+  animation: ces-claude-rise 0.3s cubic-bezier(0.2, 0.85, 0.25, 1) forwards;
 }
 /* 当同时触发文字向上翻转与 High 光斑爆散时，以 CSS 复合动画并发执行，防止相互覆盖打断 */
 .ces-ag-effort-value.is-claude-changing.is-glowing,
 .ces-ag-effort-value.ces-text-rise.is-glowing {
-  animation: ces-claude-rise 0.3s cubic-bezier(0.2, 0.85, 0.25, 1), ces-text-bloom 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: ces-claude-rise 0.3s cubic-bezier(0.2, 0.85, 0.25, 1) forwards, ces-text-bloom 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 /* Antigravity 原生模型菜单底部专属「推理等级」区域 */
 .ces-ag-section,

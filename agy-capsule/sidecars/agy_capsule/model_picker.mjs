@@ -31,7 +31,7 @@ export function readPickerState(trigger) {
     if (root.stateNode?.current && root !== root.stateNode.current) fiber = fiber.alternate;
   }
 
-  let hasOwner = false, conversationId, selector, legacyProvider, options;
+  let hasOwner = false, conversationId, selector, legacyProvider, options, plannerPreference;
   for (let node = fiber; node; node = node.return) {
     const props = node.memoizedProps;
     if (!props || typeof props !== 'object') continue;
@@ -44,6 +44,10 @@ export function readPickerState(trigger) {
         candidate.selectedModel && typeof candidate.selectedModel === 'object' &&
         Array.isArray(candidate.modelOptions)) {
       selector = candidate;
+    }
+    if (selector?.orchestratorPick && plannerPreference === undefined &&
+        typeof props.value?.onDidChange === 'function' && typeof props.value?.getState === 'function') {
+      plannerPreference = props.value.getState()?.getPrefValue?.('orchestratorModel');
     }
     if (!options) options = props.modelOptions ?? props.value?.modelOptions;
     if (!legacyProvider && typeof props.value?.getModelConfigForConversation === 'function' &&
@@ -61,8 +65,8 @@ export function readPickerState(trigger) {
     }
     return map;
   };
+  const tierRe = /^(.*?)\s*\((off|low|medium|high|extra|xhigh|max|minimal)(?:\s+thinking)?\)$/i;
   const summarize = (byLabel, extraDisabled = []) => {
-    const tierRe = /^(.*?)\s*\((off|low|medium|high|extra|xhigh|max|minimal)(?:\s+thinking)?\)$/i;
     const labels = [...byLabel.keys()];
     const items = labels.map(label => {
       const opt = byLabel.get(label);
@@ -106,7 +110,7 @@ export function readPickerState(trigger) {
     if (!hasOwner) return null;
     const scopeId = typeof conversationId === 'string' && conversationId ? conversationId : '__new__';
     const byLabel = usable(selector.modelOptions);
-    const selected = selector.selectedModel?.label;
+    let selected = selector.selectedModel?.label;
     if (!byLabel.has(selected)) return null;
     const extraDisabled = [];
     const groupLists = Array.isArray(selector.groups)
@@ -116,6 +120,63 @@ export function readPickerState(trigger) {
       for (const opt of grp?.options || []) {
         if (opt && (opt.disabled || opt.isDisabled || opt.isAvailable === false)) extraDisabled.push(opt);
       }
+    }
+    const isOrchestrator = opt => /^(gemini-pro-coordinator|gemini-pro-orchestrator(?:-.+)?)$/.test(opt?.modelId || '');
+    const selectedOption = byLabel.get(selected);
+    const hostRoot = groupLists.flatMap(group => group?.options || [])
+      .find(opt => isOrchestrator(opt) && byLabel.has(opt.label));
+    const pick = selector.orchestratorPick;
+    const plannerOptions = Array.isArray(selector.orchestratorPlanners) ? usable(selector.orchestratorPlanners) : new Map();
+    if (hostRoot && typeof pick?.select === 'function' && plannerOptions.size && !selector.bestOfNConfig?.isBestOfNEnabled) {
+      const rootOption = isOrchestrator(selectedOption) ? selectedOption : byLabel.get(hostRoot.label);
+      const planners = new Map();
+      const plannerChoices = new Map();
+      const targets = Object.create(null);
+      const defaultPlanner = [...plannerOptions.values()].find(opt => opt.value === plannerPreference)
+        ?? plannerOptions.get(selector.orchestratorDefaultPlanner?.label);
+      const currentPlanner = [...plannerOptions.values()].find(opt => opt.value === pick.model) ?? defaultPlanner;
+      const plannerLabel = opt => 'Orchestrator → ' + opt.label;
+      for (const opt of plannerOptions.values()) {
+        const match = tierRe.exec(opt.label);
+        const name = match?.[1].trim() ?? opt.label;
+        const group = planners.get(name) ?? { name, items: [] };
+        const label = plannerLabel(opt);
+        group.items.push({ label, tier: match?.[2] ?? null });
+        planners.set(name, group);
+        plannerChoices.set(label, opt);
+        const standalone = byLabel.get(opt.label);
+        if (standalone && standalone.value === opt.value) targets[opt.label] = label;
+      }
+      const orchestrator = {
+        planners: [...planners.values()],
+        current: currentPlanner ? plannerLabel(currentPlanner) : null,
+        active: isOrchestrator(selectedOption),
+        standalone: targets[currentPlanner?.label] ? currentPlanner.label : null,
+        targets,
+      };
+      // Keep the display row separate from the concrete host options and planner IDs.
+      const displayOptions = new Map();
+      for (const [label, opt] of byLabel) {
+        if (!isOrchestrator(opt)) displayOptions.set(label, opt);
+        else if (!displayOptions.has('Orchestrator')) displayOptions.set('Orchestrator', {
+          tagTitle: hostRoot.tagTitle,
+          tagDescription: 'Offloads routine steps to a faster executor.',
+        });
+      }
+      const { labels, items, families } = summarize(displayOptions, extraDisabled.filter(opt => !isOrchestrator(opt)));
+      if (orchestrator.active) selected = orchestrator.current ?? 'Orchestrator';
+      return {
+        conversationId: scopeId, labels: [...labels, ...plannerChoices.keys()], items, families, selected, orchestrator,
+        choose(label) {
+          const planner = plannerChoices.get(label);
+          if (planner) {
+            pick.select(planner.value === defaultPlanner?.value ? 0 : planner.value);
+            return selector.setSelectedModel(rootOption);
+          }
+          const option = label === 'Orchestrator' ? rootOption : displayOptions.get(label);
+          if (option) return selector.setSelectedModel(option);
+        },
+      };
     }
     const { labels, items, families } = summarize(byLabel, extraDisabled);
     return {
@@ -197,27 +258,53 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
   panel.setAttribute('role', 'menu');
   const options = document.createElement('div');
   options.className = 'dk-model-list';
+  const orchestratorSwitch = document.createElement('button');
+  orchestratorSwitch.type = 'button';
+  orchestratorSwitch.className = 'dk-orchestrator-switch';
+  orchestratorSwitch.setAttribute('role', 'switch');
+  orchestratorSwitch.innerHTML = 'Orchestrator<span class="dk-orchestrator-track" aria-hidden="true"></span>';
+  orchestratorSwitch.hidden = true;
   const status = document.createElement('div');
   status.setAttribute('role', 'status');
   const sub = document.createElement('div');
   sub.className = 'dk-model-sub';
   sub.popover = 'manual';
   sub.setAttribute('role', 'menu');
+  const tiers = document.createElement('div');
+  tiers.className = 'dk-model-tiers';
+  tiers.popover = 'manual';
+  tiers.setAttribute('role', 'menu');
   const tip = document.createElement('div');
   tip.className = 'dk-model-tip';
   tip.popover = 'manual';
   tip.setAttribute('role', 'tooltip');
-  panel.append(options, status, sub, tip);
+  panel.append(options, orchestratorSwitch, status, sub, tiers, tip);
   root.prepend(button, panel);
   button.popoverTargetElement = panel;
 
   const tierOrder = { off: 0, minimal: 1, low: 2, medium: 3, high: 4, xhigh: 5, extra: 6, max: 7 };
   const tierRe = /^(.*?)\s*\((off|low|medium|high|extra|xhigh|max|minimal)(?:\s+thinking)?\)$/i;
-  const setFormattedLabel = (el, label) => {
+  const displayTier = tier => tier?.toLowerCase() === 'xhigh' ? 'Extra High' : tier;
+  const plannerText = (label, showEffort = true) => {
+    const name = label?.replace(/^Orchestrator → /, '') ?? '';
+    const match = tierRe.exec(name);
+    return match ? match[1].trim() + (showEffort ? ' ' + displayTier(match[2]) : '') : name;
+  };
+  const switchTarget = ({ orchestrator, selected }) => orchestrator?.active
+    ? orchestrator.standalone : orchestrator?.targets[selected];
+  const setFormattedLabel = (el, label, orchestrator) => {
     const match = tierRe.exec(label);
     const textWrap = document.createElement('span');
     textWrap.className = 'dk-mp-text';
-    if (!match) {
+    if (orchestrator?.active && orchestrator.current) {
+      const nameEl = document.createElement('span');
+      nameEl.className = 'dk-mp-name';
+      nameEl.textContent = 'Orchestrator';
+      const effortEl = document.createElement('span');
+      effortEl.className = 'dk-mp-effort';
+      effortEl.textContent = ' ' + plannerText(orchestrator.current);
+      textWrap.append(nameEl, effortEl);
+    } else if (!match) {
       textWrap.textContent = label;
     } else {
       const nameEl = document.createElement('span');
@@ -247,7 +334,59 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
   let renderedGroups = new Map();
   let currentSelected = state.selected;
   let openSubRow = null;
+  let openPlannerRow = null;
   let subCloseTimer = null;
+
+  // Give a diagonal move from the active row to its submenu a short head start
+  // over sibling rows. Straight up/down movement still changes rows immediately.
+  const menuAim = menu => {
+    let origin, hovered, deferred, timer;
+    const cancel = () => {
+      clearTimeout(timer);
+      timer = null;
+    };
+    return {
+      reset() {
+        cancel();
+        origin = hovered = deferred = null;
+      },
+      update(event, row, active, activate) {
+        const x = event.clientX, y = event.clientY;
+        if (row && row === active) {
+          cancel();
+          origin = { x, y };
+          hovered = row;
+          return;
+        }
+        if (active && origin && event.pointerType !== 'touch' && menu.matches(':popover-open')) {
+          const box = menu.getBoundingClientRect();
+          const anchor = active.getBoundingClientRect();
+          const edge = box.left >= anchor.right ? box.left : box.right;
+          const progress = (x - origin.x) / (edge - origin.x);
+          const minY = origin.y + (box.top - 6 - origin.y) * progress - 4;
+          const maxY = origin.y + (box.bottom + 6 - origin.y) * progress + 4;
+          if (progress > 0 && progress < 1 && y >= minY && y <= maxY) {
+            deferred = row;
+            timer ??= setTimeout(() => {
+              timer = null;
+              const next = deferred;
+              activate(next);
+              hovered = next;
+              origin = null;
+            }, 320);
+            return;
+          }
+        }
+        cancel();
+        if (row === hovered) return;
+        activate(row);
+        hovered = row;
+        origin = { x, y };
+      },
+    };
+  };
+  const modelAim = menuAim(sub);
+  const plannerAim = menuAim(tiers);
 
   const hideTip = () => {
     if (tip.matches(':popover-open')) tip.hidePopover();
@@ -266,42 +405,66 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
     tip.style.top = Math.round(top) + 'px';
   };
 
+  const markBranch = (row, open) => {
+    if (open) row.setAttribute('data-sub-open', 'true');
+    else row.removeAttribute('data-sub-open');
+    if (row.hasAttribute('aria-haspopup')) row.setAttribute('aria-expanded', String(open));
+  };
+  const hideTiers = () => {
+    plannerAim.reset();
+    if (openPlannerRow) markBranch(openPlannerRow, false);
+    openPlannerRow = null;
+    if (tiers.matches(':popover-open')) tiers.hidePopover();
+  };
   const hideSub = () => {
     clearTimeout(subCloseTimer);
     subCloseTimer = null;
+    modelAim.reset();
+    hideTiers();
     if (openSubRow) {
-      openSubRow.removeAttribute('data-sub-open');
+      markBranch(openSubRow, false);
       openSubRow = null;
     }
     if (sub.matches(':popover-open')) sub.hidePopover();
   };
   const scheduleHideSub = () => {
     clearTimeout(subCloseTimer);
-    subCloseTimer = setTimeout(hideSub, 150);
+    subCloseTimer = setTimeout(hideSub, 260);
   };
   const cancelHideSub = () => {
     clearTimeout(subCloseTimer);
     subCloseTimer = null;
   };
-  const showSubFor = (row, group) => {
-    cancelHideSub();
-    if (currentEffortCaption || !panel.matches(':popover-open') || !group?.isMultiTier) { hideSub(); return; }
-    if (openSubRow && openSubRow !== row) openSubRow.removeAttribute('data-sub-open');
-    openSubRow = row;
-    row.setAttribute('data-sub-open', 'true');
-    sub.replaceChildren();
+  const showBeside = (menu, parent, row, preferLeft = false) => {
+    if (!menu.matches(':popover-open')) menu.showPopover();
+    const box = parent.getBoundingClientRect();
+    const anchor = row.getBoundingClientRect();
+    const size = menu.getBoundingClientRect();
+    const right = box.right - 1;
+    const left = box.left - size.width + 1;
+    const fitsRight = right + size.width <= innerWidth - 6;
+    const fitsLeft = left >= 6;
+    const x = fitsLeft && (preferLeft || !fitsRight) ? left : fitsRight ? right
+      : Math.max(6, Math.min(right, innerWidth - size.width - 6));
+    const top = Math.max(6, Math.min(anchor.top - 5, innerHeight - size.height - 6));
+    menu.style.left = x + 'px';
+    menu.style.top = top + 'px';
+  };
+  const renderTiers = (menu, group, nativeLabels = false) => {
+    menu.replaceChildren();
+    menu.setAttribute('aria-label', group.name);
     for (const item of group.items) {
       const choice = document.createElement('button');
       choice.type = 'button';
       choice.className = 'dk-model-sub-item';
       choice.setAttribute('role', 'menuitem');
       choice.dataset.label = item.label;
-      choice.setAttribute('aria-label', item.label);
+      choice.setAttribute('aria-label', nativeLabels ? plannerText(item.label) : item.label);
       const isSelected = item.label === currentSelected;
       choice.setAttribute('aria-pressed', String(isSelected));
       choice.disabled = pending !== null;
       const text = document.createElement('span');
-      text.textContent = item.tier;
+      text.textContent = nativeLabels ? displayTier(item.tier) : item.tier;
       choice.append(text);
       if (isSelected) {
         const chk = document.createElement('span');
@@ -309,17 +472,73 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
         chk.innerHTML = SVG_CHECK;
         choice.append(chk);
       }
-      sub.append(choice);
+      menu.append(choice);
     }
-    if (!sub.matches(':popover-open')) sub.showPopover();
-    const panelRect = panel.getBoundingClientRect();
-    const rowRect = row.getBoundingClientRect();
-    const subRect = sub.getBoundingClientRect();
-    let left = panelRect.right + 4;
-    if (left + subRect.width > innerWidth - 6) left = Math.max(6, panelRect.left - subRect.width - 4);
-    const top = Math.max(6, Math.min(rowRect.top - 4, innerHeight - subRect.height - 6));
-    sub.style.left = left + 'px';
-    sub.style.top = top + 'px';
+  };
+  const showSubFor = (row, group) => {
+    cancelHideSub();
+    if (currentEffortCaption || !panel.matches(':popover-open') || !(group?.planners || group?.isMultiTier)) {
+      hideSub();
+      return false;
+    }
+    if (openSubRow === row) return true;
+    hideSub();
+    openSubRow = row;
+    markBranch(row, true);
+    if (!group.planners) renderTiers(sub, group);
+    else {
+      sub.replaceChildren();
+      sub.setAttribute('aria-label', group.name);
+      for (const planner of group.planners) {
+        const target = planner.items.find(item => item.label === currentSelected)
+          ?? planner.items.find(item => item.tier?.toLowerCase() === 'medium') ?? planner.items[0];
+        const choice = document.createElement('button');
+        choice.type = 'button';
+        choice.className = 'dk-model-sub-item';
+        choice.dataset.label = target.label;
+        choice.dataset.planner = planner.name;
+        choice.setAttribute('role', 'menuitem');
+        choice.setAttribute('aria-pressed', String(planner.items.some(item => item.label === currentSelected)));
+        choice.disabled = pending !== null;
+        if (planner.isMultiTier) {
+          choice.setAttribute('aria-haspopup', 'menu');
+          choice.setAttribute('aria-expanded', 'false');
+        }
+        const main = document.createElement('span');
+        main.className = 'dk-model-main';
+        const name = document.createElement('span');
+        name.className = 'dk-mp-name';
+        name.textContent = planner.name;
+        main.append(name);
+        if (target.tier && !currentHideDefaultEffort) {
+          const effort = document.createElement('span');
+          effort.className = 'dk-mp-effort';
+          effort.textContent = displayTier(target.tier);
+          main.append(effort);
+        }
+        choice.append(main);
+        const end = document.createElement('span');
+        end.className = 'dk-mp-end';
+        if (planner.isMultiTier) end.innerHTML = SVG_CHEV;
+        else if (target.label === currentSelected) end.innerHTML = SVG_CHECK;
+        choice.append(end);
+        sub.append(choice);
+      }
+    }
+    showBeside(sub, panel, row);
+    return true;
+  };
+  const showTiersFor = row => {
+    cancelHideSub();
+    const planner = renderedGroups.get(openSubRow?.dataset.family)?.planners?.find(p => p.name === row?.dataset.planner);
+    if (!planner?.isMultiTier) { hideTiers(); return false; }
+    if (openPlannerRow === row) return true;
+    hideTiers();
+    openPlannerRow = row;
+    markBranch(row, true);
+    renderTiers(tiers, planner, true);
+    showBeside(tiers, sub, row, sub.getBoundingClientRect().left < panel.getBoundingClientRect().left);
+    return true;
   };
 
   const applyNativeMode = active => {
@@ -394,21 +613,22 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
       currentSelected = next.selected;
       if (button.dataset.label !== next.selected) {
         button.dataset.label = next.selected;
-        setFormattedLabel(button, next.selected);
+        setFormattedLabel(button, next.selected, next.orchestrator);
       }
       button.removeAttribute('title');
-      button.setAttribute('aria-label', currentCaption + ': ' + next.selected);
+      button.setAttribute('aria-label', currentCaption + ': ' +
+        (next.orchestrator?.active ? button.querySelector('.dk-mp-text').textContent : next.selected));
       panel.setAttribute('aria-label', currentCaption);
-      if (pending && next.selected === pending) {
+      if (pending && (next.selected === pending || (pending === 'Orchestrator' && next.orchestrator?.active))) {
         clearTimeout(expiry);
         pending = null;
         status.textContent = '';
         if (!currentEffortCaption) close();
         const queued = queuedEffort;
         queuedEffort = null;
-        if (queued && queued !== next.selected) queueMicrotask(() => void commitSelection(queued, true));
+        if (queued && queued !== next.selected) queueMicrotask(() => void commitSelection(queued, 'effort'));
       }
-      const key = JSON.stringify([next.items || next.labels, next.selected, pending, currentHidden, currentHideTags, currentHideDefaultEffort, currentEffortCaption, currentEffortOptions?.title]);
+      const key = JSON.stringify([next.items || next.labels, next.selected, next.orchestrator, pending, currentHidden, currentHideTags, currentHideDefaultEffort, currentEffortCaption, currentEffortOptions?.title]);
       if (key === signature) return;
       signature = key;
       hideSub();
@@ -432,16 +652,26 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
         if (!group.tagDescription && entry.tagDescription) group.tagDescription = entry.tagDescription;
         group.items.push({ label: entry.label, tier: match ? match[2] : null });
       }
+      const sortTiers = (a, b) => (tierOrder[a.tier?.toLowerCase()] ?? 99) - (tierOrder[b.tier?.toLowerCase()] ?? 99);
       for (const group of groups) {
         group.isMultiTier = !group.disabled && group.items.length >= 2 && group.items.every(item => item.tier !== null);
         group.familyName = group.isMultiTier ? group.name : group.items[0].label;
-        if (group.isMultiTier) {
-          group.items.sort((a, b) => (tierOrder[a.tier.toLowerCase()] ?? 99) - (tierOrder[b.tier.toLowerCase()] ?? 99));
+        if (group.isMultiTier) group.items.sort(sortTiers);
+        if (next.orchestrator && group.familyName === 'Orchestrator') {
+          group.planner = next.orchestrator.current;
+          group.planners = next.orchestrator.planners.map(planner => ({
+            name: planner.name,
+            items: [...planner.items].sort(sortTiers),
+            isMultiTier: planner.items.length > 1 && planner.items.every(item => item.tier !== null),
+          }));
         }
       }
 
-      const effortGroup = currentEffortCaption && groups.find(group => group.items.some(item => item.label === next.selected));
-      if (effortGroup?.isMultiTier) rememberedEffort.set(effortGroup.name, next.selected);
+      const activePlanner = next.orchestrator?.active && groups.find(group => group.planners)
+        ?.planners.find(planner => planner.items.some(item => item.label === next.selected));
+      const selectedInList = currentEffortCaption && next.orchestrator?.active ? next.orchestrator.standalone : next.selected;
+      const effortGroup = currentEffortCaption && (activePlanner || groups.find(group => group.items.some(item => item.label === next.selected)));
+      if (selectedInList && effortGroup?.isMultiTier) rememberedEffort.set(effortGroup.name, selectedInList);
       tintEffort(button.querySelector('.dk-mp-effort'), effortGroup, next.selected);
       currentEffortLabels = effortGroup ? effortGroup.items.map(item => item.label) : [];
       panel.dataset.effortMode = String(!!currentEffortCaption);
@@ -455,10 +685,14 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
         options.removeAttribute('role');
         options.removeAttribute('aria-label');
       }
+      orchestratorSwitch.hidden = !(currentEffortCaption && next.orchestrator);
+      orchestratorSwitch.disabled = !switchTarget(next);
+      orchestratorSwitch.setAttribute('aria-disabled', String(orchestratorSwitch.disabled || pending !== null));
+      orchestratorSwitch.setAttribute('aria-checked', String(next.orchestrator?.active === true));
       if (effortGroup) {
         if (!effortBar) {
-          effortBar = mountEffortBar(label => void commitSelection(label, true));
-          options.after(effortBar.element);
+          effortBar = mountEffortBar(label => void commitSelection(label, 'effort'));
+          orchestratorSwitch.after(effortBar.element);
         }
         effortBar.refresh(effortGroup, next.selected, pending, currentEffortCaption, currentEffortOptions);
         effortBar.setOpen(panel.matches(':popover-open'));
@@ -469,8 +703,9 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
       }
 
       const hiddenSet = new Set(currentHidden);
-      const filtered = groups.filter(group => !hiddenSet.has(group.familyName));
-      const visibleGroups = filtered.length > 0 ? filtered : groups;
+      const modelGroups = orchestratorSwitch.hidden ? groups : groups.filter(group => !group.planners);
+      const filtered = modelGroups.filter(group => !hiddenSet.has(group.familyName));
+      const visibleGroups = filtered.length > 0 ? filtered : modelGroups;
 
       const appendBadge = (container, group) => {
         if (currentHideTags || !group.tagTitle) return;
@@ -514,16 +749,20 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
         row.type = 'button';
         row.className = 'dk-model-row';
         row.setAttribute('role', 'menuitem');
-        const isActiveGroup = group.items.some(item => item.label === next.selected);
+        const isActiveGroup = group.planners ? next.orchestrator.active : group.items.some(item => item.label === selectedInList);
         const targetLabel = !group.isMultiTier ? group.items[0].label : !currentEffortCaption
-          ? resolveInheritedLabel(group.items, next.selected)
-          : (group.items.find(item => item.label === rememberedEffort.get(group.name))
+          ? resolveInheritedLabel(group.items, next.orchestrator?.active ? 'Orchestrator' : next.selected)
+          : (group.items.find(item => item.label === selectedInList)
+            || group.items.find(item => item.label === rememberedEffort.get(group.name))
             || group.items.find(item => item.tier.toLowerCase() === 'medium') || group.items[0]).label;
         row.dataset.label = targetLabel;
         row.dataset.family = group.familyName;
-        row.setAttribute('aria-label', targetLabel);
+        row.setAttribute('aria-label', group.planner ? group.name + ' ' + plannerText(group.planner) : targetLabel);
         row.setAttribute('aria-pressed', String(isActiveGroup));
-        if (group.isMultiTier && !currentEffortCaption) row.setAttribute('aria-haspopup', 'menu');
+        if (group.planners || (group.isMultiTier && !currentEffortCaption)) {
+          row.setAttribute('aria-haspopup', 'menu');
+          row.setAttribute('aria-expanded', 'false');
+        }
         if (currentEffortCaption) row.setAttribute('aria-disabled', String(pending !== null));
         else row.disabled = pending !== null;
 
@@ -532,15 +771,21 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
         const nameEl = document.createElement('span');
         nameEl.className = 'dk-mp-name';
         const singleMatch = !group.isMultiTier ? tierRe.exec(group.items[0].label) : null;
-        if (group.isMultiTier) {
+        main.append(nameEl);
+        if (group.planner) {
+          nameEl.textContent = group.name;
+          nameEl.classList.add('dk-mp-orchestrator');
+          const planner = document.createElement('span');
+          planner.className = 'dk-mp-name dk-mp-effort dk-mp-planner';
+          planner.textContent = plannerText(group.planner, !currentHideDefaultEffort);
+          main.append(planner);
+        } else if (group.isMultiTier) {
           nameEl.textContent = group.name;
         } else if (currentHideDefaultEffort && singleMatch) {
           nameEl.textContent = singleMatch[1].trim();
         } else {
           nameEl.textContent = group.items[0].label;
         }
-        main.append(nameEl);
-
         if (group.isMultiTier) {
           const displayTier = group.items.find(item => item.label === targetLabel)?.tier || '';
           if (displayTier && !currentHideDefaultEffort) {
@@ -557,7 +802,7 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
         const end = document.createElement('span');
         end.className = 'dk-mp-end';
         if (isActiveGroup) end.innerHTML = SVG_CHECK;
-        else if (group.isMultiTier && !currentEffortCaption) end.innerHTML = SVG_CHEV;
+        else if (group.planners || (group.isMultiTier && !currentEffortCaption)) end.innerHTML = SVG_CHEV;
         row.append(main, end);
         options.append(row);
         if (group.familyName === focusedFamily) row.focus({ preventScroll: true });
@@ -566,20 +811,35 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
   };
   root._modelPicker = picker;
 
-  const commitSelection = async (label, fromEffort = false) => {
-    if (!label || !isCurrent()) return;
+  const commitSelection = async (label, source = 'model') => {
+    if (!isCurrent()) return;
+    const fromEffort = source === 'effort';
     if (fromEffort && (!currentEffortCaption || !currentEffortLabels.includes(label))) return;
     if (pending) {
-      // Do not submit stale options concurrently: keep the newest detent in a fast drag.
+      // Keep only the newest effort choice while the host confirms the previous one.
       if (fromEffort && currentEffortLabels.includes(pending)) queuedEffort = label === pending ? null : label;
       return;
     }
     const current = read();
-    if (!current || current.conversationId !== picker.id || !current.labels.includes(label)) {
+    if (!current || current.conversationId !== picker.id) {
       picker.dispose();
       return;
     }
-    if (label === current.selected) { if (!currentEffortCaption) close(); return; }
+    if (source === 'switch') {
+      label = currentEffortCaption && switchTarget(current);
+      if (!label) return;
+    } else if (source === 'model' && currentEffortCaption && current.orchestrator?.active) {
+      // Keep routing through Orchestrator only when the chosen model and tier are supported.
+      label = current.orchestrator.targets[label] ?? label;
+    }
+    if (!current.labels.includes(label)) {
+      picker.dispose();
+      return;
+    }
+    if (label === current.selected || (label === 'Orchestrator' && current.orchestrator?.active)) {
+      if (!currentEffortCaption) close();
+      return;
+    }
     pending = label;
     status.textContent = '';
     picker.refresh(current, currentCaption, currentUnconfirmed);
@@ -611,7 +871,7 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
     picker.sync();
     if (root._modelPicker !== picker) return;
     const rect = button.getBoundingClientRect();
-    const estWidth = Math.min(264, innerWidth - 12);
+    const estWidth = Math.min(320, innerWidth - 12);
     panel.style.left = Math.max(6, Math.min(rect.left, innerWidth - estWidth - 6)) + 'px';
     panel.style.bottom = Math.max(6, innerHeight - rect.top + 6) + 'px';
     panel.style.maxHeight = Math.max(48, rect.top - 12) + 'px';
@@ -624,11 +884,11 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
     const info = event.target.closest('.dk-mp-info[data-tip]');
     if (info) showTipFor(info);
     else hideTip();
-    const row = event.target.closest('button.dk-model-row');
-    if (!row) return;
-    const group = renderedGroups.get(row.dataset.family);
-    if (group?.isMultiTier) showSubFor(row, group);
-    else hideSub();
+  });
+  options.addEventListener('pointermove', event => {
+    if (currentEffortCaption) return;
+    modelAim.update(event, event.target.closest('button.dk-model-row'), openSubRow,
+      row => showSubFor(row, renderedGroups.get(row?.dataset.family)));
   });
   options.addEventListener('pointerout', event => {
     const info = event.target.closest('.dk-mp-info[data-tip]');
@@ -638,23 +898,65 @@ export function syncModelPicker(root, footer, prefsOrEnabled, labels, findFooter
     const row = event.target.closest('button.dk-model-row');
     if (!row) return;
     const group = renderedGroups.get(row.dataset.family);
-    if (group?.isMultiTier) showSubFor(row, group);
-    else hideSub();
+    if (group?.planners && openSubRow === row) hideTiers();
+    showSubFor(row, group);
   });
+  options.addEventListener('pointerenter', cancelHideSub);
   options.addEventListener('pointerleave', () => {
     hideTip();
+    modelAim.reset();
     scheduleHideSub();
   });
-  sub.addEventListener('pointerenter', cancelHideSub);
-  sub.addEventListener('pointerleave', scheduleHideSub);
+  sub.addEventListener('pointerenter', () => modelAim.reset());
+  sub.addEventListener('pointerleave', () => plannerAim.reset());
+  tiers.addEventListener('pointerenter', () => plannerAim.reset());
+  for (const menu of [sub, tiers]) {
+    menu.addEventListener('pointerenter', cancelHideSub);
+    menu.addEventListener('pointerleave', scheduleHideSub);
+    menu.addEventListener('click', event => {
+      const choice = event.target.closest('button[data-label]');
+      if (choice) void commitSelection(choice.dataset.label);
+    });
+  }
+  sub.addEventListener('pointermove', event => {
+    plannerAim.update(event, event.target.closest('button[data-planner]'), openPlannerRow, showTiersFor);
+  });
+  sub.addEventListener('focusin', event => showTiersFor(event.target.closest('button[data-planner]')));
+  const focusFirst = menu => menu.querySelector('button:not(:disabled)')?.focus({ preventScroll: true });
+  for (const menu of [options, sub, tiers]) {
+    menu.addEventListener('keydown', event => {
+      const row = event.target.closest('button');
+      if (!row) return;
+      if (event.key === 'ArrowRight') {
+        if (menu === options && showSubFor(row, renderedGroups.get(row.dataset.family))) focusFirst(sub);
+        else if (menu === sub && showTiersFor(row)) focusFirst(tiers);
+        else return;
+      } else if ((event.key === 'ArrowLeft' || event.key === 'Escape') && menu !== options) {
+        if (menu === tiers) {
+          const parent = openPlannerRow;
+          hideTiers();
+          parent?.focus({ preventScroll: true });
+          hideTiers();
+        } else {
+          const parent = openSubRow;
+          hideSub();
+          parent?.focus({ preventScroll: true });
+          hideSub();
+        }
+      } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        const rows = [...menu.querySelectorAll('button:not(:disabled)')];
+        const step = event.key === 'ArrowDown' ? 1 : -1;
+        rows[(rows.indexOf(row) + step + rows.length) % rows.length]?.focus();
+      } else return;
+      event.preventDefault();
+      event.stopPropagation();
+    });
+  }
   options.addEventListener('click', event => {
     const choice = event.target.closest('button[data-label]');
     if (choice) void commitSelection(choice.dataset.label);
   });
-  sub.addEventListener('click', event => {
-    const choice = event.target.closest('button[data-label]');
-    if (choice) void commitSelection(choice.dataset.label);
-  });
+  orchestratorSwitch.addEventListener('click', () => void commitSelection(null, 'switch'));
 
   picker.refresh(state, currentCaption, currentUnconfirmed);
 }
