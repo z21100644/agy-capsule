@@ -17,16 +17,19 @@ export function createVersionPanel(root, check, saveSettings, install, now = Dat
   const visibleUpdate = () => update && (installing() || update.manual || enabled) && update.latestVersion !== dismissed;
   const setText = (element, value) => { if (element.textContent !== value) element.textContent = value; };
   function render() {
-    button.disabled = manualBusy || installing();
-    toggle.disabled = installing();
-    dismiss.disabled = installing();
-    updateButton.disabled = installing();
-    setText(button, t[manualBusy ? 'versionChecking' : manualResult?.status === 'current' ? 'versionUpToDate' : 'versionCheck']);
+    const busy = installing();
+    const state = installResult?.status || 'available';
+    const installFailed = state === 'error';
+    button.disabled = manualBusy || busy;
+    toggle.disabled = busy;
+    dismiss.disabled = busy;
+    updateButton.disabled = busy;
+    setText(button, t[manualBusy ? 'versionChecking' : 'versionCheck']);
     setText(toggle, t.notifyUpdates);
     toggle.title = t.notifyUpdatesHelp;
     toggle.dataset.active = String(enabled);
     toggle.setAttribute('aria-pressed', String(enabled));
-    setText(updateButton, installResult?.status === 'updating' ? t.versionUpdating : t.versionUpdate);
+    setText(updateButton, state === 'updating' ? t.versionUpdating : installFailed ? t.versionRetry : t.versionUpdate);
     const updateError = {
       busy: t.versionUpdateBusy, timeout: t.versionUpdateTimeout, releaseChanged: t.versionUpdateChanged,
       releaseCheck: t.versionUpdateRelease, download: t.versionUpdateDownload, redirect: t.versionUpdateRedirect,
@@ -34,18 +37,25 @@ export function createVersionPanel(root, check, saveSettings, install, now = Dat
       incomplete: t.versionUpdateArchive, notInstalled: t.versionUpdateNotInstalled,
       recovery: t.versionUpdateRecovery, sidecar: t.versionSidecar,
     }[installResult?.reason] || t.versionUpdateInstall;
-    setText(updateStatus, installResult?.status === 'updated' ? t.versionUpdated
-      : installResult?.status === 'error' ? t.versionUpdateFailed.replace('{reason}', updateError) + ' ' + t.versionUpdateManual : '');
-    setText(release, t.versionRelease);
-    setText(dismiss, t.versionDismiss);
+    setText(updateStatus, state === 'updated' ? t.versionUpdated : installFailed ? updateError : '');
+    setText(release, installFailed ? t.versionUpdateManual : t.versionRelease);
+    release.hidden = busy;
+    dismiss.setAttribute('aria-label', t.versionDismiss);
     const failed = manualResult?.status === 'error';
     const reason = { timeout: t.versionTimeout, rateLimit: t.versionRateLimit, noRelease: t.versionNoRelease,
       invalidRelease: t.versionInvalidRelease, localVersion: t.versionLocalMissing, sidecar: t.versionSidecar,
       http: t.versionHttp?.replace('{status}', manualResult?.httpStatus) }[manualResult?.reason] || t.versionNetwork;
-    setText(message, failed ? t.versionFailed.replace('{reason}', reason) : '');
+    const current = manualResult?.status === 'current';
+    message.dataset.state = current ? 'current' : failed ? 'error' : '';
+    setText(message, current ? t.versionUpToDate : failed ? t.versionFailed.replace('{reason}', reason) : '');
     const shown = visibleUpdate();
     notice.hidden = !shown;
-    setText(details, shown ? t.versionAvailable + ': ' + update.currentVersion + ' → ' + update.latestVersion : '');
+    notice.dataset.state = state;
+    const downloadFailed = ['timeout', 'download', 'redirect'].includes(installResult?.reason);
+    setText(details, !shown || state === 'updated' ? ''
+      : state === 'updating' ? t.versionUpdating
+      : installFailed ? (downloadFailed ? t.versionDownloadFailed : t.versionUpdateFailed)
+      : t.versionAvailable + ':\u00a0' + update.currentVersion + ' → ' + update.latestVersion);
     if (shown) release.href = update.releaseUrl;
     else release.removeAttribute('href');
   }

@@ -62,15 +62,22 @@ function prepareRelease(files, version, installedSidecar) {
       if (!files.get(posix.normalize(posix.join(posix.dirname(path), target)))?.length) throw new UpdateError('incomplete');
     }
   }
-  // The Windows installer sometimes launches Electron directly for a non-ASCII
-  // path. Keep only that known local bootstrap, not the old manifest/features.
+  // Keep the installed Windows launcher when it uses an explicit Node path
+  // or the installer's direct Electron bootstrap.
   const { command, args, env } = installedSidecar || {};
-  if (typeof command === 'string' && win32.isAbsolute(command) && win32.basename(command).toLowerCase() === 'antigravity.exe'
+  if (typeof command !== 'string' || !win32.isAbsolute(command)) return;
+  const executable = win32.basename(command).toLowerCase();
+  if (executable === 'node.exe' && win32.parse(command).root.length > 1) {
+    sidecar.command = command;
+  } else if (executable === 'antigravity.exe'
       && env?.ELECTRON_RUN_AS_NODE === '1' && typeof args?.[0] === 'string' && args[0].startsWith('--import=file:')) {
-    files.set(sidecarManifest, Buffer.from(JSON.stringify({
-      ...sidecar, command, args: [args[0], ...sidecar.args], env: { ...sidecar.env, ELECTRON_RUN_AS_NODE: '1' },
-    }, null, 2) + '\n'));
+    sidecar.command = command;
+    sidecar.args = [args[0], ...sidecar.args];
+    sidecar.env = { ...sidecar.env, ELECTRON_RUN_AS_NODE: '1' };
+  } else {
+    return;
   }
+  files.set(sidecarManifest, Buffer.from(JSON.stringify(sidecar, null, 2) + '\n'));
 }
 
 async function replaceRuntime(root, stage, backup, currentVersion, move) {

@@ -52,25 +52,27 @@ Shows the remaining 5-hour and weekly quotas and their reset countdowns for the 
 
 Shared on the third footer capsule (request failures take priority when both are active):
 
-☑ **Request failure alert**: Appears in red only when a request fails; hover or click it to see the raw error and an explanation in the panel. Reasons shown: quota exhausted, rate limited (429), disconnected, authentication error, service busy and unknown.
+☑ **Request failure alert**: Appears in red only when a request fails; hover or click it to see the raw error and an explanation. Request timeouts and connection failures are shown separately; a timeout does not mean the turn stopped. Other reasons include quota exhaustion, rate limiting (429), authentication errors, service busy and unknown errors.
 
 ☑ **First-token wait alert**: An amber capsule appears when a wait reaches the threshold (default `30s`, range `1–999s`). `Wait×2 40s` means two intervals reached the threshold this turn, including a current estimate of 40 seconds. Active tools and streaming stop the live clock. Earlier slow waits remain visible in the panel.
 
-## Enhanced model capsule
+## Models
 
-When enabled, seamlessly replaces the native composer footer model button in place with a native-styled model and effort selector (for both existing and new conversations): hover any multi-tier model to pick an effort level in one step from the side submenu, or click a model row directly to switch while inheriting your current effort (downgrading `XHigh`/`Extra`/`Max` to `High` if unsupported). Falls back to the native trigger automatically if the host interface does not match or the footer collapses on very narrow widths.
+Turn off **Revert to native model capsule** at the top of the Models tab to replace the footer’s model button with a panel that matches the native look. Click a model to keep your current effort level. Reverting pauses the features on this tab without changing your saved choices.
 
 ☑ **Hide model tags**: Hides tag badges such as `New` and `Notice` inside the dropdown.
 
 ☑ **Hide default effort**: Hides effort previews in the model dropdown list (the footer button and hover effort submenu still show tiers, and direct clicks still inherit your current effort).
 
-☑ **Customize models**: Expands the list of models discovered from the host so you can toggle individual models on or off (at least one model always remains visible).
+☑ **Model dots**: Shows colored dots next to model names.
 
-☑ **Effort bar**: Keeps the menu open when you switch models and replaces hover submenus with a slider. Click or use the arrow keys to switch tiers immediately. Drag to preview tiers, then release to apply the selection. Right-click the slider to change animation, tick marks, or the Codex / Claude style. Turn it off to restore hover submenus.
+☑ **Customize models**: Automatically expands the list of available models so you can toggle individual models on or off (at least one model always remains visible).
+
+☑ **Effort slider and Orchestrator capsule**: Keeps the menu open when you switch models and replaces hover submenus with a slider. Click or use the arrow keys to switch tiers immediately. Drag to preview tiers, then release to apply the selection. Shows the Orchestrator capsule when the host supports it. Right-click the slider to change animation, tick marks, or style. Turn it off to restore hover submenus.
 
 ## Usage history
 
-An optional block at the bottom of the sidebar statistics (controlled from a dedicated section at the bottom of Settings) that adds up the token usage recorded in this product folder's local conversations.
+An optional section at the bottom of the sidebar’s Statistics page.
 
 ☑ **Token activity**: Shows today's, this week's, this month's and all-time usage, and an activity map of the past year that switches between Daily (one cell per day) and Weekly (one cell per week); a darker cell means more usage. A narrow sidebar keeps only the most recent weeks. Point at a summary total or a cell to see its request count and the split across uncached input, cache reads, cache writes and output.
 
@@ -102,9 +104,9 @@ An optional block at the bottom of the sidebar statistics (controlled from a ded
 
 ## Settings
 
-Open **… → Extensions → agy-capsule** from the conversation header, then switch between the Statistics and Settings tabs at the top.
+Open **… → Extensions → agy-capsule** from the conversation header, then use the Statistics, Settings, and Models tabs at the top.
 
-The compact bar at the top of the **Settings** tab shows the installed version, an **Update alerts** toggle pill (on by default; click to disable background GitHub checks), and a **Check updates** button (switches in place to **Up to date** when current). When a newer GitHub release is available, a banner appears at the top of the sidebar where you can click **One-click update** to download, verify, replace runtime files (preserving your settings), and auto-reload without restarting Antigravity, or open the GitHub Release / dismiss.
+The **Settings** tab shows the installed version, an **Update alerts** switch (on by default), and a **Check updates** button. Turning alerts off stops background checks but leaves manual checks available. When a new release is available, the card shows the installed and new versions. Click **Update** to download, verify, and reload the plugin without restarting Antigravity or losing your settings. Click **Release notes** to open the GitHub release, or × to dismiss. If an update fails, the card shows why and offers **Retry** and **Manual update**.
 
 Preferences live in <code>~/.gemini/config/agy-capsule/settings.json</code> (<code>%USERPROFILE%\.gemini\config\agy-capsule\settings.json</code> on Windows). Updates and uninstalls keep them; options missing from older files fall back to defaults.
 

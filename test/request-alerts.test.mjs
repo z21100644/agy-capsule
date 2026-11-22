@@ -15,7 +15,8 @@ test('request failure classification follows reported errors rather than quota p
     ['ECONNRESET', 'network_error'], ['401 Unauthorized', 'auth_error'], ['503 Service Unavailable', 'service_unavailable'],
     ['unexpected provider failure', 'unknown'], ['context canceled by user', 'canceled'],
     ['request failed: Post "https://<API>/v1internal:streamGenerateContent?alt=sse": context canceled', 'canceled'], ['User cancelled agent execution.', 'canceled'],
-    ['input token count exceeds the maximum context length', 'context_overflow'], ['context deadline exceeded', 'network_error'],
+    ['input token count exceeds the maximum context length', 'context_overflow'], ['context deadline exceeded', 'request_timeout'],
+    ['DEADLINE_EXCEEDED', 'request_timeout'], ['read ETIMEDOUT', 'request_timeout'], ['connection reset by peer', 'network_error'],
     ['The input token count (737355) exceeds the maximum number of tokens allowed (524288)', 'context_overflow'],
     ['prompt is too long: 200001 tokens > 200000 maximum', 'context_overflow'],
     ['401 permission denied; quota access rejected', 'auth_error'], ['', 'none'],
@@ -40,6 +41,8 @@ test('colors and request failure capsule are independent, with no cancellation/o
   }
   const unknown = ui.alertView({ ...data, requestError: classifyRequestError('unknown failure') }, {}, ui.dictionaries['zh-CN']);
   assert.equal(unknown.label, '未知原因');
+  const disconnected = ui.alertView({ requestError: classifyRequestError('ECONNRESET') }, {}, ui.dictionaries['zh-CN']);
+  assert.equal(disconnected.label, '断连');
 });
 
 function vi(value) {
@@ -74,7 +77,8 @@ function waitFixture(t) {
       if (input != null) fields.push(field(20, Buffer.concat([field(1, Buffer.from('last_step_index')), field(2, Buffer.from(String(input)))])));
       if (ttft != null) fields.push(ts(11, ttft));
       if (error != null) fields.push(retry(error));
-      const data = Buffer.concat([field(1, Buffer.concat(fields)), ...(planner == null ? [] : [integer(2, planner)])]);
+      const links = planner == null ? [] : [planner].flat().map(idx => integer(2, idx));
+      const data = Buffer.concat([field(1, Buffer.concat(fields)), ...links]);
       db.prepare('INSERT INTO gen_metadata VALUES (?,?)').run(idx, data);
     },
     snapshot: includeMetrics => readConversationSnapshot(path, includeMetrics),
@@ -243,6 +247,32 @@ test('only an eligible request error can mask the current turn wait', t => {
   assert.equal(f.alert(191).label, '等待 40s', 'a newer current request clears the error');
   f.request(5, { error: '429 Too Many Requests' });
   assert.equal(f.alert(191).label, '429 限流', 'an error of unknown age is not assumed stale');
+});
+
+test('a new response clears a linked timeout before its request metadata is saved', t => {
+  const f = waitFixture(t);
+  const timeout = 'stream reading error: stream idle timeout (10m0s): context deadline exceeded';
+  f.step(10, 14, 3, 100);
+  f.step(11, 15, 3, 101, [[8, 105], [3, 705]]);
+  f.step(12, 17, 3, 705, [[3, 705]]);
+  f.request(1, { input: 10, planner: [11, 12], ttft: 4, error: timeout });
+  const timedOut = f.alert(706, true);
+  assert.equal(timedOut.label, '请求超时', 'the composer can still be Working when the request times out');
+  assert.match(timedOut.detail, /本轮仍可能继续/);
+  assert.match(timedOut.diagnostic, /stream idle timeout/);
+
+  f.step(13, 15, 8, 704, [[8, 706]]);
+  assert.equal(f.alert(706, true).mode, 'error', 'a response started before the failure does not establish recovery');
+  f.step(13, 15, 2, 709);
+  assert.equal(f.alert(710, true).mode, 'error', 'a pending step alone does not establish recovery');
+  f.step(13, 15, 8, 709, [[8, 714]]);
+  assert.equal(f.alert(714, true).visible, false, 'the newer response already has output');
+  f.step(13, 15, 3, 709, [[8, 714], [3, 715]]);
+  assert.equal(f.alert(716, true).visible, false, 'the old error does not return when that response finishes');
+
+  f.step(14, 17, 3, 716, [[3, 716]]);
+  f.request(2, { input: 12, planner: [13, 14], ttft: 5, error: '503 Service Unavailable' });
+  assert.equal(f.snapshot().requestError.kind, 'service_unavailable', 'a fresh failure is still reported');
 });
 
 test('queued input creation time never starts the live first-token timer', t => {

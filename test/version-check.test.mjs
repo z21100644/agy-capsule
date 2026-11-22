@@ -161,7 +161,7 @@ test('sidebar renders all three languages, dismisses automatic prompts and repor
   assert.equal(nodes.notify.dataset.active, 'true');
   assert.equal(nodes.notify.attributes['aria-pressed'], 'true');
   await panel.checkAutomatically();
-  assert.equal(nodes.available.textContent, 'Update available: 1.0.0 → 2.0.0');
+  assert.equal(nodes.available.textContent, 'Update available:\u00a01.0.0 → 2.0.0');
   assert.equal(nodes.release.href, update.releaseUrl);
   assert.deepEqual(installs, [], 'a background version check does not start an install');
   nodes.dismiss.click();
@@ -194,32 +194,32 @@ test('sidebar renders all three languages, dismisses automatic prompts and repor
   await manual;
   assert.equal(nodes.check.textContent, '检查更新');
   assert.equal(nodes.notice.hidden, false);
-  assert.equal(nodes.available.textContent, '发现新版本: 1.0.0 → 2.0.0');
-  assert.equal(nodes.update.textContent, '一键更新');
+  assert.equal(nodes.available.textContent, '发现新版本:\u00a01.0.0 → 2.0.0');
+  assert.equal(nodes.update.textContent, '更新');
   setLanguage('zh-TW', false);
   assert.equal(root.lang, 'zh-TW');
   assert.equal(nodes.check.textContent, '檢查更新');
   assert.equal(nodes.notice.hidden, false, 'an explicit result is not an automatic prompt');
-  for (const [locale, loading, latest] of [
-    ['en', 'Checking…', 'Up to date'], ['zh-CN', '检查中…', '已是最新'], ['zh-TW', '檢查中…', '已是最新'],
+  for (const [locale, loading, checkLabel, latest] of [
+    ['en', 'Checking…', 'Check updates', 'Up to date'], ['zh-CN', '检查中…', '检查更新', '已是最新版本'], ['zh-TW', '檢查中…', '檢查更新', '已是最新版本'],
   ]) {
     setLanguage(locale, false);
     reply = { status: 'current' };
     const pending = nodes.check.click();
     assert.equal(nodes.check.textContent, loading);
     await pending;
-    assert.equal(nodes.check.textContent, latest);
-    assert.equal(nodes.status.textContent, '');
+    assert.equal(nodes.check.textContent, checkLabel);
+    assert.equal(nodes.status.textContent, latest);
     assert.equal(nodes.check.disabled, false);
   }
   reply = { status: 'error', reason: 'timeout' };
   await nodes.check.click();
   assert.equal(nodes.status.textContent, '檢查失敗：GitHub 回應逾時。');
   assert.equal(nodes.check.textContent, '檢查更新');
-  for (const [locale, label, progress, failure] of [
-    ['en', 'Update now', 'Updating…', /exceeds the size limit.*GitHub release/],
-    ['zh-CN', '一键更新', '更新中…', /超过大小限制.*手动更新/],
-    ['zh-TW', '一鍵更新', '更新中…', /超過大小限制.*手動更新/],
+  for (const [locale, label, progress, failure, retry, manual] of [
+    ['en', 'Update', 'Updating…', /exceeds the size limit/, 'Retry', 'Manual update'],
+    ['zh-CN', '更新', '更新中…', /超过大小限制/, '重试', '手动更新'],
+    ['zh-TW', '更新', '更新中…', /超過大小限制/, '重試', '手動更新'],
   ]) {
     setLanguage(locale, false);
     reply = update;
@@ -236,7 +236,9 @@ test('sidebar renders all three languages, dismisses automatic prompts and repor
     await pending;
     assert.match(nodes['update-status'].textContent, failure);
     assert.equal(nodes.update.disabled, false);
-    assert.equal(nodes.update.textContent, label);
+    assert.equal(nodes.update.textContent, retry);
+    assert.equal(nodes.release.textContent, manual);
+    assert.equal(nodes.release.href, update.releaseUrl);
   }
   const retry = nodes.update.click();
   resolveInstall({ status: 'updated', version: '2.0.0' });

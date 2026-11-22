@@ -1,7 +1,7 @@
 {
   "name": "agy-capsule",
   "displayName": "agy-capsule",
-  "version": "1.4.3",
+  "version": "1.4.5",
   "description": "Real-time context window and token usage monitor reading ground-truth API telemetry from local conversation databases, with automatic compaction detection.",
   "logo": "logo.svg"
 }

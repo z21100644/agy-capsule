@@ -18,6 +18,7 @@ import { createCloudTelemetryStore } from './cloud_telemetry.mjs';
 import { createUsageHistory } from './usage_history.mjs';
 import { createUsagePresentation } from './usage_ui.mjs';
 import { EFFORT_BAR_CSS, EFFORT_TRACK_MARKUP } from './effort_bar.mjs';
+import { createMotionThemes } from './motion_themes.mjs';
 import { CURRENT_VERSION, VERSION_ROUTE, createVersionChecker } from './version_check.mjs';
 import { createVersionPanel } from './version_ui.mjs';
 import { createPluginUpdater, UPDATE_ROUTE } from './version_update.mjs';
@@ -26,7 +27,7 @@ const settingsStore = createSettingsStore();
 const checkVersion = createVersionChecker({ getPrefs: () => settingsStore.read() });
 const updatePlugin = createPluginUpdater({ sidecarDirectory: dirname(fileURLToPath(import.meta.url)), checkVersion });
 const cloudTelemetryStore = createCloudTelemetryStore();
-const PANEL_VERSION = 142;
+const PANEL_VERSION = 155;
 const presentation = createPresentation();
 export function getNotifyText(shortcutState, prefs) {
   const t = presentation.dictionaries[prefs?.settingsLanguage] || presentation.dictionaries['zh-CN'];
@@ -386,6 +387,21 @@ async function readSelectedConversation(convId, allowLatest, subagentOnly = fals
 
 const conversationCache = createSqliteSnapshotCache(readConversationSnapshot);
 
+function visibleLocalRequestError(request, steps) {
+  const error = request?.requestError ?? classifyRequestError();
+  if (error.kind === 'none' || !request.stepIndices.length) return error;
+  // Steps can show the next response streaming before its gen_metadata row is saved.
+  const lastOutputIndex = request.stepIndices.reduce((last, idx) => Math.max(last, idx), -1);
+  const lastOutput = steps.find(step => step.idx === lastOutputIndex);
+  if (!lastOutput) return error;
+  const failedAt = lastOutput.recordedCompletedAtMs || lastOutput.terminalAtMs;
+  const resumed = steps.some(step => step.idx > lastOutputIndex && step.step_type === 15 &&
+    (step.status === 8 || (step.status === 3 && step.generatingAtMs > 0)) &&
+    (!lastOutput.executionId || step.executionId === lastOutput.executionId) &&
+    (!failedAt || step.createdAtMs >= failedAt));
+  return resumed ? classifyRequestError() : error;
+}
+
 function readConversationSnapshot(dbPath, includeTurnMetrics = true) {
   const db = new DatabaseSync(dbPath, { readOnly: true });
   let rawRows = [];
@@ -467,7 +483,7 @@ function readConversationSnapshot(dbPath, includeTurnMetrics = true) {
   const turns = [];
   let maxContextTokens = 0;
   let latestGeneration = null;
-  let latestRequestError = classifyRequestError();
+  let latestTurnRequest = null;
   const parsedRequests = [];
 
   for (const row of rawRows) {
@@ -477,7 +493,7 @@ function readConversationSnapshot(dbPath, includeTurnMetrics = true) {
     latestGeneration = parsed.generation;
     // Known earlier requests may finish late; they cannot replace the current turn's error.
     const earlierRequest = userStepIndex !== null && parsed.lastStepIndex >= 0 && parsed.lastStepIndex < userStepIndex;
-    if (!earlierRequest) latestRequestError = parsed.requestError;
+    if (!earlierRequest) latestTurnRequest = parsed;
     if (parsed.maxContextTokens > 0) {
       maxContextTokens = parsed.maxContextTokens;
     }
@@ -530,7 +546,7 @@ function readConversationSnapshot(dbPath, includeTurnMetrics = true) {
   const totalOutputTokens = Math.round(rawOut * genScale);
   const totalThinkingTokens = Math.round(rawThink * genScale);
 
-  let turnQueue, turnSpeed = null, childTurnMetrics = null;
+  let turnQueue, requestError, turnSpeed = null, childTurnMetrics = null;
   if (subagent) {
     // Parent messages and task notifications can start fresh executions without
     // a USER_INPUT step. Never roll previous executions into this one's alerts.
@@ -547,7 +563,7 @@ function readConversationSnapshot(dbPath, includeTurnMetrics = true) {
     }) : [];
     const childExecutors = executors.filter(item => item.executionId === executionId);
     turnQueue = summarizeTurnQueue(requests, steps, steps[0]?.idx, childExecutors, true);
-    latestRequestError = requests.at(-1)?.requestError ?? classifyRequestError();
+    requestError = visibleLocalRequestError(requests.at(-1), steps);
     const execution = summarizeSubagentExecution(steps, childExecutors);
     if (execution) {
       let associationIncomplete = false;
@@ -567,6 +583,7 @@ function readConversationSnapshot(dbPath, includeTurnMetrics = true) {
   } else {
     turnQueue = summarizeTurnQueue(parsedRequests, turnSteps, userStepIndex, executors);
     turnSpeed = summarizeTurnSpeed(parsedRequests, turnSteps, userStepIndex);
+    requestError = visibleLocalRequestError(latestTurnRequest, turnSteps);
   }
 
   return {
@@ -575,7 +592,7 @@ function readConversationSnapshot(dbPath, includeTurnMetrics = true) {
     turnQueue,
     turnMetrics: subagent ? childTurnMetrics : includeTurnMetrics
       ? summarizeTurnMetrics(parsedRequests, turnSteps.map(step => ({ ...step, completedAtMs: step.recordedCompletedAtMs })), metricsUserStepIndex, executors) : null,
-    requestError: latestRequestError,
+    requestError,
     generation: summarizeGeneration(latestGeneration),
     cachedIn: latest.cachedIn,
     uncachedIn: latest.uncachedIn,
@@ -769,6 +786,22 @@ const renderPickCard = (key, items, { helpId = key, tip = '' } = {}) => `
       </div>
     </div>
     ${tip ? `<div class="metric-help" id="help-${helpId}" role="tooltip" data-i18n="${tip}"></div>` : ''}
+  </div>`;
+
+const FX_ICON_SVG = {
+  prism: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.2 8H4.6"/><path d="M7.6 4.4L10.6 8L7.6 11.6L4.6 8Z"/><path d="M11.6 4.8H14.8"/><path d="M11.9 8H14.8"/><path d="M11.6 11.2H14.8"/></svg>',
+  gravity: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="2.05" fill="currentColor" stroke="none"/><path d="M3.4 4.8A5.6 5.6 0 0 1 11.2 3.4"/><circle cx="11.6" cy="3.8" r="1.15" fill="currentColor" stroke="none"/><path d="M12.6 11.2A5.6 5.6 0 0 1 4.8 12.6"/><circle cx="4.4" cy="12.2" r="1.15" fill="currentColor" stroke="none"/></svg>',
+  semicircle: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true"><circle cx="8" cy="12.2" r="1.8" fill="currentColor" stroke="none"/><circle cx="2.2" cy="8.7" r="1.12"/><circle cx="4.5" cy="5.8" r="1.12"/><circle cx="8" cy="4.7" r="1.12"/><circle cx="11.5" cy="5.8" r="1.12"/><circle cx="13.8" cy="8.7" r="1.12"/></svg>',
+  none: '',
+};
+
+const renderFxPickCard = (key, items, { sub = false, grid = false, id = '', hidden = false } = {}) => `
+  <div class="setting-card${sub ? ' is-sub' : ''}${grid ? ' is-grid' : ''}"${id ? ` id="${id}"` : ''} data-setting-card="${key}"${hidden ? ' hidden' : ''}>
+    <div class="setting-head"><span class="setting-label" data-i18n="${key}"></span>
+      <div class="pv-pick-inline fx-pick-wrap">
+        ${items.map(([val, labelKey, iconHtml = '']) => `<button type="button" class="pv-swatch fx-swatch" data-pick-setting="${key}" data-pick-value="${val}" data-pick-label="${labelKey}">${iconHtml}<span data-i18n="${labelKey}"></span></button>`).join('')}
+      </div>
+    </div>
   </div>`;
 
 // Segmented option control styled like the settings switches.
@@ -1084,41 +1117,70 @@ const UI_HTML = `<!DOCTYPE html>
     }
     .settings { display: flex; flex-direction: column; gap: 0; width: 100%; }
     .sidebar-content { padding: 12px 14px; }
-    .version-panel { max-width: 1120px; margin: 0 auto 10px; font-size: 12.5px; color: var(--foreground, #ebebeb); }
-    .sidebar-nav:has(.sidebar-tabs[data-view="stats"]) + .version-panel :is(.version-line, #version-status) { display: none; }
-    .sidebar-nav:has(.sidebar-tabs[data-view="stats"]) + .version-panel:not(:has(#version-notice:not([hidden]))) { display: none; }
-    .version-line, .version-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; }
-    .version-line { justify-content: space-between; flex-wrap: nowrap; }
-    .version-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: center; gap: 5px; width: 124px; margin-left: auto; flex-shrink: 0; }
-    .version-controls > .pv-swatch { width: 100%; padding: 4px 4px; white-space: nowrap; }
-    .version-panel[lang="en"] .version-controls { width: auto; min-width: 124px; grid-template-columns: auto auto; }
-    .version-panel[lang="en"] .version-controls > .pv-swatch { padding: 4px 8px; }
-    #version-check { color: var(--foreground, #ebebeb); }
-    #version-check:disabled { opacity: .7; cursor: wait; }
-    .version-button { min-height: 28px; padding: 3px 8px; border-radius: 5px; border: 1px solid var(--border, #555); background: var(--card, #222225); color: inherit; font: inherit; cursor: pointer; }
-    .version-button:hover:not(:disabled) { background: color-mix(in srgb, var(--foreground, #ebebeb) 9%, var(--card, #222225)); }
-    .version-button:disabled { opacity: .7; cursor: wait; }
+    .version-panel { max-width: 1120px; margin: 0 auto 10px; font-size: 12.5px; color: var(--foreground, #ebebeb); container: version / inline-size; --version-link: color-mix(in srgb, #2b7fff 48%, var(--foreground, #ebebeb)); }
+    .sidebar-nav:has(.sidebar-tabs:is([data-view="stats"], [data-view="fx"])) + .version-panel :is(.version-line, #version-status) { display: none; }
+    .sidebar-nav:has(.sidebar-tabs:is([data-view="stats"], [data-view="fx"])) + .version-panel:not(:has(#version-notice:not([hidden]))) { display: none; }
+    .version-line { display: flex; align-items: center; justify-content: space-between; gap: 5px; }
+    #version-number { color: var(--muted-foreground, #a2a2a9); font-variant-numeric: tabular-nums; }
+    .version-controls { display: flex; align-items: center; justify-content: flex-end; gap: 5px; }
+    .version-controls > .pv-swatch { padding: 4px 7px; white-space: nowrap; font-size: inherit; }
+    #version-notify { border-color: transparent; background: transparent; color: var(--muted-foreground, #a2a2a9); font-weight: 400; }
+    #version-notify:hover:not(:disabled) { background: var(--secondary, #303034); }
+    #version-notify::before {
+      content: ""; width: 19px; height: 11px; border-radius: 10px; flex: none;
+      background: radial-gradient(circle at var(--version-knob-x, 5.5px) 50%, var(--card, #222225) 3px, transparent 3.7px)
+        var(--version-toggle-track, color-mix(in srgb, currentColor 46%, var(--card, #222225)));
+    }
+    #version-notify[data-active="true"] { --version-knob-x: 13.5px; --version-toggle-track: currentColor; }
+    #version-check { color: inherit; }
+    .version-panel button:disabled { opacity: .7; cursor: default; }
     .version-panel :is(button, a):focus-visible { outline: 2px solid #388bfd; outline-offset: 1px; }
     .version-feedback { margin: 0; line-height: 1.5; }
     .version-feedback:not(:empty) { margin-top: 5px; }
-    .version-notice { margin-top: 7px; padding: 8px 10px; border-radius: 7px; border: 1px solid var(--border, #555); background: var(--card, #222225); line-height: 1.5; }
-    .version-notice p { margin: 4px 0; }
-    .version-notice .version-feedback:empty { margin: 0; }
-    .version-notice a { color: inherit; text-decoration: underline; }
-    .version-actions { margin-top: 5px; }
-    #version-update { border-color: #2b7fff; background: color-mix(in srgb, #2b7fff 18%, var(--card, #222225)); }
-    #version-update:hover:not(:disabled) { background: color-mix(in srgb, #2b7fff 29%, var(--card, #222225)); }
-    @media(pointer:coarse) { .version-button, #version-notify, .version-actions a { min-height: 44px; } .version-actions a { display: inline-flex; align-items: center; } }
+    #version-status[data-state="current"], .version-notice[data-state="updated"] { background: color-mix(in srgb, #22a574 13%, var(--card, #222225)); }
+    #version-status[data-state="current"] { padding: 5px 8px; border-radius: 6px; }
+    .version-notice { margin-top: 7px; padding: 8px; border-radius: 8px; border: 1px solid var(--border, #555); background: var(--card, #222225); }
+    .version-notice[data-state="error"] { border-color: color-mix(in srgb, #ec854d 36%, var(--border, #555)); }
+    .version-actions { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto auto; align-items: center; gap: 5px; min-height: 36px; }
+    .version-icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; color: var(--version-link); background: color-mix(in srgb, #2b7fff 14%, var(--card, #222225)); }
+    .version-icon svg, #version-dismiss svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
+    .version-icon svg[data-icon="warning"], .version-notice[data-state="error"] svg[data-icon="download"] { display: none; }
+    .version-notice[data-state="error"] svg[data-icon="warning"] { display: block; }
+    .version-notice[data-state="error"] .version-icon { color: inherit; background: color-mix(in srgb, #ec854d 18%, var(--card, #222225)); }
+    .version-notice[data-state="updated"] .version-actions { display: none; }
+    .version-notice[data-state="updated"] .version-feedback { margin: 0; }
+    #version-available { display: block; font-size: 13px; font-weight: 650; line-height: 1.3; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    #version-release { color: var(--version-link); font-size: 12px; text-decoration: none; }
+    #version-release:hover { text-decoration: underline; text-underline-offset: 2px; }
+    #version-update, #version-dismiss { display: grid; place-items: center; border: 0; border-radius: 6px; padding: 0; font: inherit; cursor: pointer; }
+    #version-update { padding: 4px 10px; min-height: 29px; color: #fff; background: #2656d1; font-weight: 600; white-space: nowrap; }
+    #version-update:hover:not(:disabled) { background: #1d49b9; }
+    #version-dismiss { width: 24px; height: 26px; color: var(--muted-foreground, #a2a2a9); background: transparent; }
+    #version-dismiss:hover:not(:disabled) { color: inherit; background: var(--secondary, #303034); }
+    #version-update-status { color: var(--muted-foreground, #a2a2a9); }
+    .version-progress { display: none; height: 3px; overflow: hidden; margin-top: 7px; border-radius: 2px; background: color-mix(in srgb, #2b7fff 18%, transparent); }
+    .version-progress::before { content: ""; display: block; width: 35%; height: 100%; border-radius: inherit; background: #2b7fff; animation: version-progress 1.2s ease-in-out infinite alternate; }
+    .version-notice[data-state="updating"] .version-progress { display: block; }
+    @keyframes version-progress { to { transform: translateX(185%); } }
+    @media(prefers-reduced-motion: reduce) { .version-progress::before { animation: none; } }
+    @container version (max-width: 278px) {
+      .version-actions { grid-template-columns: minmax(0, 1fr) auto auto; }
+      .version-icon { display: none; }
+      #version-available { font-size: 12.5px; }
+      #version-update { padding-inline: 8px; }
+    }
+    @media(pointer:coarse) { .version-controls > .pv-swatch, #version-update, #version-dismiss { min-height: 44px; } #version-dismiss { width: 44px; } #version-release:not([hidden]) { display: inline-flex; align-items: center; min-height: 24px; } }
     .sidebar-view[hidden] { display: none; }
     .sidebar-nav { position: sticky; top: 0; z-index: 20; margin: -12px -14px 10px; padding: 8px 14px; background: var(--background, #141414); border-bottom: 1px solid color-mix(in srgb, var(--border, rgba(142,142,147,.24)) 65%, transparent); }
-    .sidebar-tabs { position: relative; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: center; max-width: 1120px; margin: 0 auto; padding: 2.5px; border-radius: 7px; background: color-mix(in srgb, var(--foreground, #ebebeb) 6%, var(--background, #141414)); border: 1px solid color-mix(in srgb, var(--foreground, #ebebeb) 10%, transparent); }
+    .sidebar-tabs { position: relative; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: center; max-width: 1120px; margin: 0 auto; padding: 2.5px; border-radius: 7px; background: color-mix(in srgb, var(--foreground, #ebebeb) 6%, var(--background, #141414)); border: 1px solid color-mix(in srgb, var(--foreground, #ebebeb) 10%, transparent); }
     .sidebar-tabs button { position: relative; z-index: 1; min-width: 0; min-height: 26px; padding: 3px 8px; border: 0; border-radius: 5px; background: transparent; color: var(--muted-foreground, #8e8e93); font: inherit; font-size: 12.5px; font-weight: 500; cursor: pointer; transition: color .15s ease; }
     .sidebar-tabs button[aria-selected="true"] { color: var(--foreground, #ebebeb); font-weight: 600; }
     .sidebar-tabs button:hover { color: var(--foreground, #ebebeb); }
     .sidebar-tabs button:focus-visible { outline: 2px solid #388bfd; outline-offset: 1px; }
     .sidebar-toggle-track { position: absolute; inset: 2.5px; border-radius: 5px; pointer-events: none; }
-    .sidebar-toggle-thumb { display: block; width: 50%; height: 100%; border-radius: 5px; background: color-mix(in srgb, var(--foreground, #ebebeb) 14%, var(--background, #141414)); box-shadow: 0 1px 2.5px rgba(0,0,0,.22), inset 0 0 0 1px color-mix(in srgb, var(--foreground, #ebebeb) 14%, transparent); transform: translateX(0); transition: transform .18s cubic-bezier(.22,1,.36,1); }
+    .sidebar-toggle-thumb { display: block; width: calc(100% / 3); height: 100%; border-radius: 5px; background: color-mix(in srgb, var(--foreground, #ebebeb) 14%, var(--background, #141414)); box-shadow: 0 1px 2.5px rgba(0,0,0,.22), inset 0 0 0 1px color-mix(in srgb, var(--foreground, #ebebeb) 14%, transparent); transform: translateX(0); transition: transform .18s cubic-bezier(.22,1,.36,1); }
     .sidebar-tabs[data-view="settings"] .sidebar-toggle-thumb { transform: translateX(100%); }
+    .sidebar-tabs[data-view="fx"] .sidebar-toggle-thumb { transform: translateX(200%); }
     @media(prefers-reduced-motion:reduce) { .sidebar-toggle-thumb { transition: none; } }
     @media(pointer:coarse) { .sidebar-tabs button { min-height: 44px; } }
     .nowrap { white-space: nowrap; }
@@ -1129,7 +1191,7 @@ const UI_HTML = `<!DOCTYPE html>
     .settings-scope-title { font-size: 12px; font-weight: 600; color: var(--muted-foreground, #8e8e93); }
     .setting-card { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 7px 0; border-top: 1px solid color-mix(in srgb, var(--border, rgba(142,142,147,.24)) 55%, transparent); background: transparent; }
     .settings > .setting-card:first-child, .settings-scope + .setting-card { border-top: 0; }
-    .setting-card[data-parent-off="true"], [data-parent-off="true"] { opacity: .45; }
+    [data-parent-off="true"], .settings-fx[data-native-capsule="true"] > :not(.fx-native-scope) { opacity: .45; }
     [data-parent-off="true"] .setting-check,
     [data-parent-off="true"] input[type="checkbox"] { cursor: not-allowed; }
     .setting-head.setting-pair-head { justify-content: flex-start; gap: 14px; flex-wrap: nowrap; }
@@ -1581,31 +1643,21 @@ const UI_HTML = `<!DOCTYPE html>
     .cdp-notice ol { margin: 5px 0 0; padding-left: 18px; display: grid; gap: 4px; }
     .cdp-notice code, .metric-help code { user-select: text; font-family: ui-monospace, Consolas, monospace; font-size: 11px; padding: 0 3px; border-radius: 3px; background: color-mix(in srgb, var(--foreground, #ebebeb) 8%, transparent); color: var(--foreground, #ebebeb); box-decoration-break: clone; -webkit-box-decoration-break: clone; }
     .cdp-notice code { word-break: break-all; }
-    .setting-model-card { container-type: inline-size; container-name: model-card; }
-    .setting-model-grid { display: grid; grid-template-columns: repeat(2, auto); justify-content: start; align-items: center; column-gap: 14px; row-gap: 6px; }
-    .setting-model-grid .setting-pair-item > label { font-size: 13px; color: var(--foreground, #ebebeb); min-width: 0; }
-    @container model-card (min-width: 520px) { .setting-model-grid { grid-template-columns: repeat(3, auto); } }
-    @container model-card (min-width: 680px) { .setting-model-grid { grid-template-columns: repeat(4, auto); } }
-    @container model-card (min-width: 840px) { .setting-model-grid { grid-template-columns: repeat(5, auto); } }
-    @container model-card (min-width: 960px) { .setting-model-grid { grid-template-columns: repeat(6, auto); } }
-    @container model-card (min-width: 380px) { #sidebar-settings[lang^="zh"] .setting-model-grid { grid-template-columns: repeat(3, auto); } }
-    @container model-card (min-width: 510px) { #sidebar-settings[lang^="zh"] .setting-model-grid { grid-template-columns: repeat(4, auto); } }
-    @container model-card (min-width: 640px) { #sidebar-settings[lang^="zh"] .setting-model-grid { grid-template-columns: repeat(5, auto); } }
-    @container model-card (min-width: 740px) { #sidebar-settings[lang^="zh"] .setting-model-grid { grid-template-columns: repeat(6, auto); } }
-    .pv-mp { display: flex; flex-wrap: nowrap; align-items: center; gap: 8px; font-size: 11.5px; transition: opacity .18s ease; }
-    .pv-mp-row { display: inline-flex; align-items: center; justify-content: space-between; gap: 10px; padding: 2px 6px 2px 8px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--border, rgba(142,142,147,.28)) 85%, transparent); background: var(--card, color-mix(in srgb, var(--foreground, #ebebeb) 4%, var(--background, #141414))); box-shadow: 0 1px 2.5px rgba(0, 0, 0, .08); color: var(--foreground, #ebebeb); white-space: nowrap; flex-shrink: 0; }
+    .pv-mp-dot { width: 5px; height: 5px; border-radius: 50%; background: #e14d67; margin-right: 5px; flex-shrink: 0; transition: opacity .16s ease, width .16s ease, margin-right .16s ease; }
+    .setting-model-card[data-show-model-dots="false"] .pv-mp-dot { width: 0; opacity: 0; margin-right: 0; }
+    .setting-model-card .setting-preview { padding: 4px 2px; }
+    .pv-mp { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; width: 100%; max-width: 100%; box-sizing: border-box; font-size: 11.5px; transition: opacity .18s ease; }
+    .pv-mp-row { display: inline-flex; align-items: center; justify-content: space-between; gap: 6px; padding: 2px 6px 2px 7px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--border, rgba(142,142,147,.28)) 85%, transparent); background: var(--card, color-mix(in srgb, var(--foreground, #ebebeb) 4%, var(--background, #141414))); box-shadow: 0 1px 2.5px rgba(0, 0, 0, .08); color: var(--foreground, #ebebeb); white-space: nowrap; flex: 0 1 auto; min-width: 0; max-width: 100%; box-sizing: border-box; }
     .pv-mp-row-main { display: inline-flex; align-items: center; min-width: 0; }
-    .pv-mp-row-name { color: var(--foreground, #ebebeb); }
+    .pv-mp-row-name { color: var(--foreground, #ebebeb); overflow: hidden; text-overflow: ellipsis; }
     .pv-mp-row-effort { display: inline-block; overflow: hidden; white-space: nowrap; max-width: 40px; margin-left: 5px; opacity: .75; color: var(--muted-foreground, #8e8e93); transition: max-width .2s ease, opacity .18s ease, margin-left .2s ease; }
     .pv-mp-row-tag { display: inline-flex; align-items: center; overflow: hidden; white-space: nowrap; max-width: 44px; margin-left: 5px; padding: 0 5px; border-radius: 999px; background: var(--secondary, rgba(142,142,147,.16)); color: var(--muted-foreground, #8e8e93); font-size: 10px; line-height: 15px; transition: max-width .2s ease, opacity .18s ease, margin-left .2s ease, padding .2s ease; }
     .pv-mp-row-chev { display: inline-flex; align-items: center; color: var(--muted-foreground, #8e8e93); opacity: .75; flex-shrink: 0; }
     .pv-mp-row-chev svg { width: 12px; height: 12px; display: block; }
-    [data-setting-card="modelEffortPicker"][data-checked="false"] .pv-mp { opacity: .4; }
-    [data-setting-card="modelEffortPicker"][data-hide-default-effort="true"] .pv-mp-row-effort { max-width: 0; opacity: 0; margin-left: 0; }
-    [data-setting-card="modelEffortPicker"][data-hide-model-tags="true"] .pv-mp-row-tag { max-width: 0; opacity: 0; margin-left: 0; padding-left: 0; padding-right: 0; }
+    .setting-model-card[data-hide-default-effort="true"] .pv-mp-row-effort { max-width: 0; opacity: 0; margin-left: 0; }
+    .setting-model-card[data-hide-model-tags="true"] .pv-mp-row-tag { max-width: 0; opacity: 0; margin-left: 0; padding-left: 0; padding-right: 0; }
     .pv-model-list { display: flex; flex-wrap: wrap; gap: 5px; padding-top: 4px; }
-    [data-setting-card="modelEffortPicker"]:not([data-customize-models="true"]) .pv-model-list { display: none; }
-    .pv-model-list:empty { display: none; }
+    .pv-model-list[hidden], .pv-model-list:empty { display: none; }
     .pv-model-item { width: auto; max-width: 100%; min-height: 22px; justify-content: center; padding: 2px 9px; border-radius: 999px; font-size: 11.5px; line-height: 1.25; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .pv-model-item[data-active="true"] { border-color: #4ea84e; background: color-mix(in srgb, #4ea84e 14%, var(--card, #222225)); }
     .pv-model-empty { font-size: 11.5px; color: var(--muted-foreground, #8e8e93); padding: 2px 2px 0; }
@@ -1616,14 +1668,78 @@ const UI_HTML = `<!DOCTYPE html>
     [data-setting-card="showUsageActivity"][data-checked="false"] .pv-usage-heat,
     [data-setting-card="showModelUsage"][data-checked="false"] .pv-usage-bars { opacity: .4; }
     ${EFFORT_BAR_CSS}
-    .pv-effort-bar { flex: 1 1 88px; min-width: 68px; max-width: 132px; display: flex; align-items: center; }
+    .pv-effort-bar { flex: 1 1 76px; min-width: 68px; max-width: 132px; display: flex; align-items: center; }
     .pv-effort-bar .ces-inline { width: 100%; padding-top: 0; }
-    .pv-effort-bar .ces-track { height: 14px; --ces-fill: calc(100% - 7px) !important; box-shadow: 0 0 8px rgba(168, 85, 247, 0.35), inset 0 1px 1.5px rgba(0, 0, 0, 0.24) !important; }
-    .pv-effort-bar .ces-fill { border-radius: 7px 0 0 7px; }
+    .pv-effort-bar .ces-track { height: 14px; --ces-fill: calc(100% - 7px) !important; box-shadow: 0 0 8px rgba(228, 92, 118, 0.38), inset 0 1px 1.5px rgba(0, 0, 0, 0.24) !important; }
+    .pv-effort-bar .ces-fill { border-radius: 7px 0 0 7px; overflow: hidden; }
     .pv-effort-bar .ces-knob { width: 14px; height: 14px; margin: -7px 0 0 -7px; }
+    .pv-nebula { position: absolute; inset: 0; pointer-events: none; }
+    .pv-nebula::after { content: ""; position: absolute; inset: 0 0 56% 0; background: linear-gradient(180deg, rgba(255,255,255,.18), transparent); }
+    .pv-nebula i { position: absolute; height: 1.6px; border-radius: 999px; background: linear-gradient(90deg, transparent, rgba(224,146,108,.48) 65%, rgba(248,198,192,.92)); }
+    .pv-nebula i:nth-child(1) { top: 24%; left: 10%; width: 22%; }
+    .pv-nebula i:nth-child(2) { top: 52%; left: 28%; width: 28%; height: 1.8px; }
+    .pv-nebula i:nth-child(3) { top: 76%; left: 16%; width: 20%; opacity: .78; }
+    .pv-nebula i:nth-child(4) { top: 30%; left: 58%; width: 24%; }
+    .pv-nebula i:nth-child(5) { top: 68%; left: 64%; width: 22%; height: 1.5px; }
     .setting-model-card:not([data-effort-bar="true"]) .pv-effort-bar { display: none; }
     .setting-pair-item > .setting-head { display: inline-flex; align-items: center; gap: 6px; }
-    .setting-model-card:not([data-help-dismissed]):has([data-setting-card="showEffortBar"] .setting-head:hover, [data-setting-card="showEffortBar"]:focus-within) > #help-effort-bar { visibility: visible; }
+    .settings-fx { container-type: inline-size; container-name: fx-panel; }
+    .settings-fx > .settings-scope:first-child { margin-top: 0; padding-top: 2px; border-top: 0; }
+    .fx-native-scope > .fx-toggle-head input[type="checkbox"] { margin-inline-start: auto; }
+    .settings-fx .fx-toggle-head .setting-label { white-space: normal; flex-shrink: 1; }
+    .settings-fx .setting-card[hidden], .settings-fx .setting-head[hidden] { display: none; }
+    .settings-fx .setting-card.is-sub { padding-left: 9px; border-top: 0; padding-top: 2px; }
+    .settings-fx .setting-card.is-sub::before { content: ""; position: absolute; left: 2px; top: 4px; bottom: 8px; width: 2px; border-radius: 99px; background: color-mix(in srgb, var(--border, rgba(142,142,147,.28)) 90%, transparent); }
+    .settings-fx .setting-card.is-sub .setting-label { font-size: 12px; color: var(--muted-foreground, #8e8e93); }
+    .settings-fx .setting-label { font-size: 12.5px; white-space: nowrap; flex-shrink: 0; }
+    .settings-fx .setting-card.is-grid .setting-head { flex-direction: column; align-items: stretch; gap: 5px; }
+    .settings-fx .setting-card.is-grid .fx-pick-wrap { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); width: 100%; margin-left: 0; gap: 4px; }
+    .settings-fx .setting-card.is-grid .fx-swatch { width: 100%; padding: 3px 4px; }
+    .fx-pick-wrap { flex-wrap: nowrap; justify-content: flex-end; gap: 3px; min-width: 0; }
+    .fx-swatch { min-height: 24px; padding: 2px 5.5px; font-size: 11px; gap: 3px; white-space: nowrap; }
+    .fx-swatch svg { width: 11.5px; height: 11.5px; flex-shrink: 0; }
+    @container fx-panel (max-width: 242px) {
+      .settings-fx .setting-head:not(.fx-toggle-head) { flex-direction: column; align-items: stretch; gap: 5px; }
+      .fx-pick-wrap { flex-wrap: wrap; justify-content: flex-start; margin-left: 0; }
+    }
+    .fx-preview-card { margin-top: 4px; padding: 9px 10px; border-radius: 8px; }
+    .fx-orch-stage { position: relative; height: 30px; width: 100%; border-radius: 999px; overflow: hidden; border: 0; padding: 0; cursor: pointer; display: flex; align-items: center; justify-content: center; margin-bottom: 8px; background: transparent; transition: transform .14s cubic-bezier(.22,1,.36,1), border-radius .2s ease, margin-bottom .2s ease; }
+    .fx-orch-stage[data-shape="claude"] { border-radius: 9px; }
+    .fx-orch-stage[data-shape="dock"] { border-radius: 8px 8px 0 0; margin-bottom: 0; }
+    .fx-orch-stage:active { transform: scale(.985); }
+    .fx-orch-stage:focus-visible { outline: 2px solid #388bfd; outline-offset: 2px; }
+    .fx-orch-label { position: relative; z-index: 2; display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 500; transition: color .2s ease, text-shadow .2s ease; }
+    .fx-orch-label svg { width: 13px; height: 13px; flex-shrink: 0; }
+    .fx-orch-badge { font-size: 9.5px; line-height: 1; padding: 2px 5px; border-radius: 99px; font-weight: 600; background: rgba(255,255,255,.22); color: #ffffff; transition: background-color .2s ease, color .2s ease; }
+    .fx-orch-stage[aria-pressed="false"] .fx-orch-badge { background: rgba(var(--fx-dock-rgb, 139, 92, 246), .16); color: var(--fx-dock-accent, #8b5cf6); }
+    .fx-pv-rows { display: flex; flex-direction: column; gap: 4px; transition: padding .2s ease, background-color .2s ease, box-shadow .2s ease, border-radius .2s ease; }
+    .fx-preview-card[data-dock="true"] .fx-pv-rows { padding: 6px 6px 5px; border-radius: 0 0 8px 8px; background: rgba(var(--fx-dock-rgb, 139, 92, 246), .06); box-shadow: inset 1px 0 0 rgba(var(--fx-dock-rgb, 139, 92, 246), .42), inset -1px 0 0 rgba(var(--fx-dock-rgb, 139, 92, 246), .42), inset 0 -1px 0 rgba(var(--fx-dock-rgb, 139, 92, 246), .42), 0 6px 14px -4px rgba(var(--fx-dock-rgb, 139, 92, 246), .26); }
+    .fx-pv-row { display: grid; grid-template-columns: 74px 1fr; align-items: center; gap: 8px; width: 100%; padding: 1px 2px; border-radius: 6px; transition: background .12s ease; }
+    .fx-preview-card[data-dots="false"] .fx-pv-row { grid-template-columns: 62px 1fr; }
+    .fx-pv-row:hover { background: color-mix(in srgb, var(--foreground, #ebebeb) 5%, transparent); }
+    .fx-pv-row-name { display: inline-flex; align-items: center; gap: 5px; padding: 0; border: 0; background: transparent; font: inherit; font-size: 11.5px; color: var(--muted-foreground, #8e8e93); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; text-align: left; }
+    .fx-pv-row-name:focus-visible { outline: 2px solid #388bfd; outline-offset: 1px; border-radius: 4px; }
+    .fx-pv-row[data-selected="true"] .fx-pv-row-name { color: var(--foreground, #ebebeb); font-weight: 600; }
+    .fx-pv-row-dot { width: 5.5px; height: 5.5px; border-radius: 50%; flex-shrink: 0; opacity: .72; transition: opacity .14s ease, transform .14s ease; }
+    .fx-pv-row[data-selected="true"] .fx-pv-row-dot { opacity: 1; transform: scale(1.22); }
+    .fx-preview-card[data-dots="false"] .fx-pv-row-dot { display: none; }
+    .fx-toggle-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; cursor: pointer; min-height: 24px; }
+    .fx-toggle-head input[type="checkbox"] { appearance: none; -webkit-appearance: none; position: relative; margin: 0; flex-shrink: 0; width: 28px; height: 15px; border-radius: 99px; background: color-mix(in srgb, var(--foreground, #ebebeb) 13%, transparent); border: 1px solid color-mix(in srgb, var(--foreground, #ebebeb) 16%, transparent); cursor: pointer; transition: background .18s ease, border-color .18s ease; }
+    .fx-toggle-head input[type="checkbox"]::after { content: ""; position: absolute; top: 1.5px; left: 1.5px; width: 10px; height: 10px; border-radius: 50%; background: var(--muted-foreground, #8e8e93); transform: translateX(0); transition: transform .18s cubic-bezier(.22,1,.36,1), background .18s ease; }
+    .fx-toggle-head input[type="checkbox"]:checked { background: rgba(78, 168, 78, .24); border-color: rgba(78, 168, 78, .65); }
+    .fx-toggle-head input[type="checkbox"]:checked::after { transform: translateX(13px); background: #4ea84e; }
+    .fx-toggle-head input[type="checkbox"]:focus-visible { outline: 2px solid #388bfd; outline-offset: 1px; }
+    .settings-fx[data-native-capsule="true"] .fx-toggle-head:has(:disabled),
+    .settings-fx[data-native-capsule="true"] :disabled { cursor: not-allowed; }
+    .fx-pv-track { position: relative; height: 20px; border-radius: 999px; overflow: hidden; background: color-mix(in srgb, var(--foreground, #ebebeb) 10%, transparent); box-shadow: inset 0 1px 2px rgba(0,0,0,.22); transition: border-radius .16s ease; cursor: grab; touch-action: none; }
+    .fx-pv-track[data-dragging="true"] { cursor: grabbing; }
+    .fx-pv-track:focus-visible { outline: 2px solid #388bfd; outline-offset: 1px; }
+    .fx-pv-track[data-shape="claude"] { border-radius: 6px; }
+    .fx-pv-knob { position: absolute; top: 1px; width: 18px; height: 18px; border-radius: 999px; background: #ffffff; box-shadow: 0 1px 4px rgba(0,0,0,.32); pointer-events: none; transform: translateX(-50%); transition: border-radius .16s ease, width .16s ease; z-index: 3; }
+    .fx-pv-track[data-shape="claude"] .fx-pv-knob { width: 16px; border-radius: 5px; }
+    .fx-pv-ticks { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
+    .fx-pv-tick { position: absolute; top: 50%; width: 3px; height: 3px; border-radius: 50%; transform: translate(-50%, -50%); transition: opacity .16s ease, background-color .16s ease; }
+    .fx-pv-track[data-shape="claude"] .fx-pv-tick { width: 2.5px; height: 5px; border-radius: 1px; }
     @media(pointer:coarse) { .pv-swatch { min-height: 40px; } }
   </style>
 </head>
@@ -1632,9 +1748,10 @@ const UI_HTML = `<!DOCTYPE html>
   <main class="sidebar-content">
   <div class="sidebar-nav">
     <div class="sidebar-tabs" role="tablist" aria-label="Sidebar 页面" data-view="stats">
-      <button type="button" id="sidebar-tab-stats" role="tab" aria-selected="true" aria-controls="sidebar-stats" tabindex="0">统计</button>
       <span class="sidebar-toggle-track" aria-hidden="true"><span class="sidebar-toggle-thumb"></span></span>
+      <button type="button" id="sidebar-tab-stats" role="tab" aria-selected="true" aria-controls="sidebar-stats" tabindex="0">统计</button>
       <button type="button" id="sidebar-tab-settings" role="tab" aria-selected="false" aria-controls="sidebar-settings" tabindex="-1">设置</button>
+      <button type="button" id="sidebar-tab-fx" role="tab" aria-selected="false" aria-controls="sidebar-fx" tabindex="-1">模型</button>
     </div>
   </div>
   <div class="version-panel" id="version-panel">
@@ -1647,12 +1764,19 @@ const UI_HTML = `<!DOCTYPE html>
     </div>
     <p class="version-feedback" id="version-status" role="status"></p>
     <div class="version-notice" id="version-notice" hidden>
-      <strong id="version-available" role="status" aria-atomic="true"></strong>
       <div class="version-actions">
-        <button type="button" class="version-button" id="version-update" aria-describedby="version-update-status"></button>
-        <a id="version-release" target="_blank" rel="noopener noreferrer"></a>
-        <button type="button" class="version-button" id="version-dismiss"></button>
+        <span class="version-icon" aria-hidden="true">
+          <svg data-icon="download" viewBox="0 0 24 24"><path d="M12 3v12m-4-4 4 4 4-4M5 16v3a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3"/></svg>
+          <svg data-icon="warning" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.2m0 3.6h.01"/></svg>
+        </span>
+        <div>
+          <strong id="version-available" role="status" aria-atomic="true"></strong>
+          <a id="version-release" target="_blank" rel="noopener noreferrer"></a>
+        </div>
+        <button type="button" id="version-update" aria-describedby="version-update-status"></button>
+        <button type="button" id="version-dismiss"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
       </div>
+      <div class="version-progress" aria-hidden="true"></div>
       <p class="version-feedback" id="version-update-status" role="status" aria-atomic="true"></p>
     </div>
   </div>
@@ -1782,59 +1906,6 @@ const UI_HTML = `<!DOCTYPE html>
     ${renderCheckCard({ id: 'setting-pop-animation', key: 'popAnimation', checked: DEFAULT_SETTINGS.popAnimation })}
 
     <div class="settings-scope" data-settings-scope="features" data-i18n="featuresSection"></div>
-    <div class="setting-card setting-model-card" data-setting-card="modelEffortPicker" data-checked="${DEFAULT_SETTINGS.modelEffortPicker}" data-hide-model-tags="${DEFAULT_SETTINGS.hideModelTags}" data-hide-default-effort="${DEFAULT_SETTINGS.hideDefaultEffort}" data-customize-models="false">
-      <div class="setting-model-grid">
-        <div class="setting-pair-item">
-          <label class="setting-check">
-            <input id="setting-model-effort-picker" name="modelEffortPicker" type="checkbox"${DEFAULT_SETTINGS.modelEffortPicker ? ' checked' : ''} />
-            <span data-i18n="modelEffortPicker"></span>
-          </label>
-        </div>
-        <div class="setting-pair-item" data-setting-card="hideModelTags" data-checked="${DEFAULT_SETTINGS.hideModelTags}" data-parent-off="${!DEFAULT_SETTINGS.modelEffortPicker}">
-          <label class="setting-check">
-            <input id="setting-hide-model-tags" name="hideModelTags" type="checkbox"${DEFAULT_SETTINGS.hideModelTags ? ' checked' : ''} />
-            <span data-i18n="hideModelTags"></span>
-          </label>
-        </div>
-        <div class="setting-pair-item" data-setting-card="hideDefaultEffort" data-checked="${DEFAULT_SETTINGS.hideDefaultEffort}" data-parent-off="${!DEFAULT_SETTINGS.modelEffortPicker}">
-          <label class="setting-check">
-            <input id="setting-hide-default-effort" name="hideDefaultEffort" type="checkbox"${DEFAULT_SETTINGS.hideDefaultEffort ? ' checked' : ''} />
-            <span data-i18n="hideDefaultEffort"></span>
-          </label>
-        </div>
-        <div class="setting-pair-item" data-setting-card="customizeModelList" data-checked="${DEFAULT_SETTINGS.customizeModelList}" data-parent-off="${!DEFAULT_SETTINGS.modelEffortPicker}">
-          <label class="setting-check">
-            <input id="setting-customize-model-list" name="customizeModelList" type="checkbox"${DEFAULT_SETTINGS.customizeModelList ? ' checked' : ''} />
-            <span data-i18n="customizeModelList"></span>
-          </label>
-        </div>
-        <div class="setting-pair-item" data-setting-card="expandModelList" data-checked="false" data-parent-off="true">
-          <label class="setting-check">
-            <input id="setting-expand-model-list" type="checkbox" data-ui-toggle="expandModelList" />
-            <span data-i18n="expandModelList"></span>
-          </label>
-        </div>
-        <div class="setting-pair-item" data-setting-card="showEffortBar" data-checked="false" data-parent-off="${!DEFAULT_SETTINGS.modelEffortPicker}">
-          <div class="setting-head">
-            <label class="setting-check">
-              <input name="showEffortBar" type="checkbox" disabled aria-describedby="help-effort-bar" />
-              <span data-i18n="showEffortBar"></span>
-            </label><span class="setting-help-dot" aria-hidden="true">?</span>
-          </div>
-        </div>
-      </div>
-      <div class="setting-preview" aria-hidden="true">
-        <div class="pv-mp">
-          <span class="pv-mp-row">
-            <span class="pv-mp-row-main"><span class="pv-mp-row-name">Gemini 4 Argon</span><span class="pv-mp-row-effort">High</span><span class="pv-mp-row-tag">New</span></span>
-            <span class="pv-mp-row-chev"><svg viewBox="0 -960 960 960" fill="currentColor" aria-hidden="true"><path d="M504-480 320-664l56-56 240 240-240 240-56-56 184-184Z"/></svg></span>
-          </span>
-          <div class="pv-effort-bar">${EFFORT_TRACK_MARKUP}</div>
-        </div>
-      </div>
-      <div class="metric-help" id="help-effort-bar" role="tooltip"><span data-i18n="effortBarCredit"></span><code>LLYSH-HANNARI/antigravity-Codex-Claude-effort-slider</code><span data-i18n="effortBarCreditSuffix"></span></div>
-      <div class="pv-model-list" id="setting-model-list" data-toggle-setting="hiddenModels" role="group"></div>
-    </div>
     ${renderCheckCard({ id: 'setting-highlight-active-model', key: 'highlightActiveModel', checked: false })}
     ${renderCheckCard({ id: 'setting-hide-unavailable-quota', key: 'hideUnavailableQuota', checked: DEFAULT_SETTINGS.hideUnavailableQuota })}
     ${renderCheckCard({ id: 'setting-quota-dividers', key: 'showQuotaDividers', checked: DEFAULT_SETTINGS.showQuotaDividers })}
@@ -1953,11 +2024,140 @@ const UI_HTML = `<!DOCTYPE html>
     ${renderCheckCard({ id: 'setting-model-usage', key: 'showModelUsage', checked: DEFAULT_SETTINGS.showModelUsage })}
   </section>
 
+  <section class="settings settings-fx sidebar-view" id="sidebar-fx" role="tabpanel" aria-labelledby="sidebar-tab-fx" tabindex="0" hidden>
+    <div class="settings-scope metric-setting fx-native-scope">
+      <label class="setting-head fx-toggle-head" data-setting-card="modelEffortPicker">
+        <span class="setting-label" data-i18n="nativeModelCapsule"></span>
+        <span class="setting-help-dot" aria-hidden="true">?</span>
+        <input id="setting-native-model-capsule" name="modelEffortPicker" type="checkbox" aria-describedby="help-native-model-capsule"${DEFAULT_SETTINGS.modelEffortPicker ? '' : ' checked'} />
+      </label>
+      <div class="metric-help" id="help-native-model-capsule" role="tooltip" data-i18n="nativeModelCapsuleTip"></div>
+    </div>
+    <div class="setting-card setting-model-card" data-hide-model-tags="${DEFAULT_SETTINGS.hideModelTags}" data-hide-default-effort="${DEFAULT_SETTINGS.hideDefaultEffort}" data-show-model-dots="${DEFAULT_SETTINGS.showModelDots}">
+      <label class="fx-toggle-head" data-setting-card="hideModelTags">
+        <span class="setting-label" data-i18n="hideModelTags"></span>
+        <input id="setting-hide-model-tags" name="hideModelTags" type="checkbox"${DEFAULT_SETTINGS.hideModelTags ? ' checked' : ''} />
+      </label>
+      <label class="fx-toggle-head" data-setting-card="hideDefaultEffort">
+        <span class="setting-label" data-i18n="hideDefaultEffort"></span>
+        <input id="setting-hide-default-effort" name="hideDefaultEffort" type="checkbox"${DEFAULT_SETTINGS.hideDefaultEffort ? ' checked' : ''} />
+      </label>
+      <label class="fx-toggle-head" data-setting-card="showModelDots">
+        <span class="setting-label" data-i18n="showModelDots"></span>
+        <input id="setting-show-model-dots" name="showModelDots" type="checkbox"${DEFAULT_SETTINGS.showModelDots ? ' checked' : ''} />
+      </label>
+      <label class="fx-toggle-head" data-setting-card="customizeModelList">
+        <span class="setting-label" data-i18n="customizeModelList"></span>
+        <input id="setting-customize-model-list" name="customizeModelList" type="checkbox" aria-controls="setting-model-list"${DEFAULT_SETTINGS.customizeModelList ? ' checked' : ''} />
+      </label>
+      <div class="pv-model-list" id="setting-model-list" data-toggle-setting="hiddenModels" role="group" hidden></div>
+      <label class="fx-toggle-head" data-setting-card="showEffortBar">
+        <span class="setting-label" data-i18n="showEffortBar"></span>
+        <input name="showEffortBar" type="checkbox"${DEFAULT_SETTINGS.showEffortBar ? ' checked' : ''} />
+      </label>
+      <div class="setting-preview" aria-hidden="true">
+        <div class="pv-mp">
+          <span class="pv-mp-row">
+            <span class="pv-mp-row-main"><span class="pv-mp-dot"></span><span class="pv-mp-row-name">Gemini 4 Neon</span><span class="pv-mp-row-effort">High</span><span class="pv-mp-row-tag">New</span></span>
+            <span class="pv-mp-row-chev"><svg viewBox="0 -960 960 960" fill="currentColor" aria-hidden="true"><path d="M504-480 320-664l56-56 240 240-240 240-56-56 184-184Z"/></svg></span>
+          </span>
+          <div class="pv-effort-bar">${EFFORT_TRACK_MARKUP}</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-scope metric-setting" data-settings-scope="fx-slider">
+      <div class="setting-head" tabindex="0" aria-describedby="help-effort-bar">
+        <span class="settings-scope-title" data-i18n="fxSliderSection"></span>
+        <span class="setting-help-dot" aria-hidden="true">?</span>
+      </div>
+      <div class="metric-help" id="help-effort-bar" role="tooltip"><span data-i18n="effortBarCredit"></span><code>LLYSH-HANNARI/antigravity-Codex-Claude-effort-slider</code><span data-i18n="effortBarCreditSuffix"></span></div>
+    </div>
+    ${renderFxPickCard('effortTheme', [
+      ['auto', 'themeAuto'],
+      ['gemini', 'themeGemini'],
+      ['claude', 'themeClaude'],
+      ['codex', 'themeCodex'],
+    ])}
+    <div class="setting-card is-sub" id="fx-slider-themes-card">
+      <div class="setting-head" id="fx-gemini-card" data-setting-card="geminiTheme"><span class="setting-label" data-i18n="geminiTheme"></span>
+        <div class="pv-pick-inline fx-pick-wrap">
+          <button type="button" class="pv-swatch fx-swatch" data-pick-setting="geminiTheme" data-pick-value="physical" data-pick-label="geminiPhysical"><span data-i18n="geminiPhysical"></span></button>
+          <button type="button" class="pv-swatch fx-swatch" data-pick-setting="geminiTheme" data-pick-value="ribbon" data-pick-label="geminiRibbon"><span data-i18n="geminiRibbon"></span></button>
+          <button type="button" class="pv-swatch fx-swatch" data-pick-setting="geminiTheme" data-pick-value="nebula" data-pick-label="geminiNebula"><span data-i18n="geminiNebula"></span></button>
+        </div>
+      </div>
+      <div class="setting-head" id="fx-claude-card" data-setting-card="claudeTheme"><span class="setting-label" data-i18n="claudeTheme"></span>
+        <div class="pv-pick-inline fx-pick-wrap">
+          <button type="button" class="pv-swatch fx-swatch" data-pick-setting="claudeTheme" data-pick-value="matrix" data-pick-label="claudeMatrix"><span data-i18n="claudeMatrix"></span></button>
+          <button type="button" class="pv-swatch fx-swatch" data-pick-setting="claudeTheme" data-pick-value="bars" data-pick-label="claudeBars"><span data-i18n="claudeBars"></span></button>
+          <button type="button" class="pv-swatch fx-swatch" data-pick-setting="claudeTheme" data-pick-value="spark" data-pick-label="claudeSpark"><span data-i18n="claudeSpark"></span></button>
+        </div>
+      </div>
+    </div>
+    ${renderFxPickCard('effortMotion', [
+      ['fast', 'motionFast'],
+      ['full', 'motionFull'],
+    ])}
+    ${renderFxPickCard('effortTicks', [
+      ['highlight', 'ticksHighlight'],
+      ['dim', 'ticksDim'],
+      ['hidden', 'ticksHidden'],
+    ])}
+
+    <div class="settings-scope" data-i18n="fxOrchestratorSection"></div>
+    ${renderFxPickCard('orchestratorMode', [
+      ['follow', 'orchModeFollow'],
+      ['dock', 'orchModeDock'],
+      ['custom3d', 'orchModeCustom3d'],
+    ])}
+    <div class="setting-card is-sub" id="fx-orch-custom3d-card" data-setting-card="orchestrator3dStyle" hidden>
+      <div class="setting-head"><span class="setting-label" data-i18n="geminiTheme"></span>
+        <div class="pv-pick-inline fx-pick-wrap">
+          <button type="button" class="pv-swatch fx-swatch" data-pick-setting="orchestrator3dStyle" data-pick-value="chamber" data-pick-label="orch3dChamber"><span data-i18n="orch3dChamber"></span></button>
+          <button type="button" class="pv-swatch fx-swatch" data-pick-setting="orchestrator3dStyle" data-pick-value="helix" data-pick-label="orch3dHelix"><span data-i18n="orch3dHelix"></span></button>
+          <button type="button" class="pv-swatch fx-swatch" data-pick-setting="orchestrator3dStyle" data-pick-value="orbital" data-pick-label="orch3dOrbital"><span data-i18n="orch3dOrbital"></span></button>
+        </div>
+      </div>
+      <div class="setting-head"><span class="setting-label" data-i18n="claudeTheme"></span>
+        <div class="pv-pick-inline fx-pick-wrap">
+          <button type="button" class="pv-swatch fx-swatch" data-pick-setting="orchestrator3dStyle" data-pick-value="c-matrix" data-pick-label="orch3dMatrix"><span data-i18n="orch3dMatrix"></span></button>
+          <button type="button" class="pv-swatch fx-swatch" data-pick-setting="orchestrator3dStyle" data-pick-value="c-louver" data-pick-label="orch3dLouver"><span data-i18n="orch3dLouver"></span></button>
+          <button type="button" class="pv-swatch fx-swatch" data-pick-setting="orchestrator3dStyle" data-pick-value="c-spark" data-pick-label="orch3dSpark"><span data-i18n="orch3dSpark"></span></button>
+        </div>
+      </div>
+      <div class="setting-head"><span class="setting-label" data-i18n="codexTheme"></span>
+        <div class="pv-pick-inline fx-pick-wrap">
+          <button type="button" class="pv-swatch fx-swatch" data-pick-setting="orchestrator3dStyle" data-pick-value="nebula" data-pick-label="codexNebula"><span data-i18n="codexNebula"></span></button>
+          <button type="button" class="pv-swatch fx-swatch" data-pick-setting="orchestrator3dStyle" data-pick-value="beam" data-pick-label="codexBeam"><span data-i18n="codexBeam"></span></button>
+          <button type="button" class="pv-swatch fx-swatch" data-pick-setting="orchestrator3dStyle" data-pick-value="orb" data-pick-label="codexOrb"><span data-i18n="codexOrb"></span></button>
+        </div>
+      </div>
+    </div>
+    ${renderFxPickCard('orchestratorIcon', [
+      ['prism', 'orchIconPrism', FX_ICON_SVG.prism],
+      ['gravity', 'orchIconGravity', FX_ICON_SVG.gravity],
+      ['semicircle', 'orchIconSemicircle', FX_ICON_SVG.semicircle],
+      ['none', 'orchIconNone'],
+    ])}
+
+    <div class="settings-scope" data-i18n="fxPreviewSection"></div>
+    <div class="pv-detail-card fx-preview-card">
+      <button type="button" id="fx-orch-stage" class="fx-orch-stage" data-fx-preview="orch" aria-pressed="true" data-shape="pill">
+        <canvas id="fx-orch-canvas" style="position:absolute;inset:0;width:100%;height:100%;display:block;pointer-events:none;"></canvas>
+        <span id="fx-orch-label" class="fx-orch-label"></span>
+      </button>
+      <div id="fx-preview-rows" class="fx-pv-rows"></div>
+    </div>
+  </section>
+
   </main>
   <script>
     ${getPresentationScript()}
     const presentation = globalThis.__agyCapsulePresentation;
     const usageUi = (${createUsagePresentation.toString()})(presentation.formatTokens, presentation.escapeHtml);
+    const motionThemesApi = (${createMotionThemes.toString()})();
+    const FX_ICONS = ${JSON.stringify(FX_ICON_SVG)};
     ${renderFieldEditor.toString()}
     let prefs = ${JSON.stringify(DEFAULT_SETTINGS)};
     let prefsSig = JSON.stringify(prefs);
@@ -2044,11 +2244,13 @@ const UI_HTML = `<!DOCTYPE html>
       const used = document.querySelector(scale ? '[data-usage-scale="' + scale + '"]' : period ? '[data-usage-period="' + period + '"]' : '[data-usage-shift="' + shift + '"]');
       (used?.disabled ? document.querySelector('[data-usage-shift]:enabled') : used)?.focus();
     });
+    const SIDEBAR_VIEWS = ['stats', 'settings', 'fx'];
     const sidebarTabs = document.querySelector('.sidebar-tabs');
+    const fxSection = document.getElementById('sidebar-fx');
     const panel = document.querySelector('.panel');
     let statsSig, cacheSig, quotaSig;
     let sidebarView = 'stats';
-    const sidebarScroll = { stats: 0, settings: 0 };
+    const sidebarScroll = { stats: 0, settings: 0, fx: 0 };
     function syncConversation() {
       const id = window.sidecar?.conversationId ?? new URLSearchParams(location.search).get('conversationId') ?? '';
       if (id !== conversationId) {
@@ -2068,11 +2270,12 @@ const UI_HTML = `<!DOCTYPE html>
       if (lastData) renderData(lastData);
     }
     function selectSidebarView(view, focus = false) {
+      if (!SIDEBAR_VIEWS.includes(view)) return;
       if (view !== sidebarView) {
         sidebarScroll[sidebarView] = window.scrollY;
         sidebarView = view;
         sidebarTabs.dataset.view = view;
-        for (const name of ['stats', 'settings']) {
+        for (const name of SIDEBAR_VIEWS) {
           const selected = name === view;
           const tab = document.getElementById('sidebar-tab-' + name);
           tab.setAttribute('aria-selected', String(selected));
@@ -2083,21 +2286,506 @@ const UI_HTML = `<!DOCTYPE html>
           syncConversation();
           replayStats();
         }
+        fxPreview.setActive(view === 'fx');
         renderHealthNotice();
         window.scrollTo({ top: sidebarScroll[view], behavior: 'instant' });
       }
       if (focus) document.getElementById('sidebar-tab-' + view).focus({ preventScroll: true });
     }
-    for (const view of ['stats', 'settings']) {
+    for (const view of SIDEBAR_VIEWS) {
       document.getElementById('sidebar-tab-' + view).addEventListener('click', () => selectSidebarView(view));
     }
-    sidebarTabs.querySelector('.sidebar-toggle-track').addEventListener('click', () => selectSidebarView(sidebarView === 'stats' ? 'settings' : 'stats', true));
+    sidebarTabs.querySelector('.sidebar-toggle-track').addEventListener('click', () => {
+      const next = SIDEBAR_VIEWS[(SIDEBAR_VIEWS.indexOf(sidebarView) + 1) % SIDEBAR_VIEWS.length];
+      selectSidebarView(next, true);
+    });
     sidebarTabs.addEventListener('keydown', event => {
       if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
       event.preventDefault();
-      const view = event.key === 'Home' ? 'stats' : event.key === 'End' ? 'settings' : sidebarView === 'stats' ? 'settings' : 'stats';
+      const idx = SIDEBAR_VIEWS.indexOf(sidebarView);
+      const view = event.key === 'Home' ? 'stats'
+        : event.key === 'End' ? 'fx'
+        : event.key === 'ArrowRight' ? SIDEBAR_VIEWS[(idx + 1) % SIDEBAR_VIEWS.length]
+        : SIDEBAR_VIEWS[(idx - 1 + SIDEBAR_VIEWS.length) % SIDEBAR_VIEWS.length];
       selectSidebarView(view, true);
     });
+
+    const fxPreview = (() => {
+      const mt = motionThemesApi;
+      const stageBtn = document.getElementById('fx-orch-stage');
+      const previewCard = stageBtn?.closest('.fx-preview-card');
+      const orchCanvas = document.getElementById('fx-orch-canvas');
+      const orchLabel = document.getElementById('fx-orch-label');
+      const rowsHost = document.getElementById('fx-preview-rows');
+      if (!previewCard || !orchCanvas || !rowsHost) return { setActive() {}, syncPrefs() {} };
+
+      const CLAUDE_MODELS = ['Claude Opus 4.6', 'Claude Sonnet 4.6', 'Claude Haiku 4.5'];
+      const ROWS = [
+        { id: 'neon', label: 'Neon', baseName: 'Gemini 4 Neon' },
+        { id: 'argon', label: 'Argon', baseName: 'Gemini 4 Argon' },
+        { id: 'hydrogen', label: 'Hydrogen', baseName: 'Gemini 4 Hydrogen' },
+        { id: 'carbon', label: 'Carbon', baseName: 'Gemini 4 Carbon' },
+        { id: 'flash', label: 'Flash', baseName: 'Gemini 3 Flash' },
+        { id: 'claude', label: 'Claude', baseName: CLAUDE_MODELS[0] },
+        { id: 'codex', label: 'Codex', baseName: 'GPT-5.4 Codex' },
+      ];
+      const TICK_STOPS = [0, 1 / 3, 2 / 3, 1];
+      const TIER_NAMES = ['Low', 'Medium', 'High', 'Max'];
+      const energyForPct = p => 0.14 + 0.86 * mt.clamp01(p);
+
+      let active = false;
+      let rafId = 0;
+      let lastNow = 0;
+      let targetPct = TICK_STOPS[2];
+      let smoothPct = targetPct;
+      let smoothEnergy = energyForPct(targetPct);
+      let dragging = false;
+      let selectedId = 'neon';
+      let claudeSubIdx = 0;
+      let orchOn = true;
+      let orchAnimP = 1;
+      let orchFrom = 1;
+      let orchStart = 0;
+      let orchPhase = 0;
+      let fxClock = 0;
+      let fxPrefsSig = '';
+      const flows = {};
+      const rowNodes = {};
+
+      const isReduced = () => Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
+      const isLightSurface = () => {
+        try {
+          const bg = getComputedStyle(document.body).backgroundColor || '';
+          const p = bg.match(/[\\d.]+/g);
+          if (!p || p.length < 3 || (p.length > 3 && Number(p[3]) < 0.5)) return false;
+          return (0.2126 * Number(p[0]) + 0.7152 * Number(p[1]) + 0.0722 * Number(p[2])) / 255 >= 0.5;
+        } catch {
+          return false;
+        }
+      };
+
+      const rowModelName = row => row.id === 'claude' ? CLAUDE_MODELS[claudeSubIdx] : row.baseName;
+      const selectedRow = () => ROWS.find(r => r.id === selectedId) || ROWS[0];
+
+      const replayOrch = () => {
+        if (!orchOn) return;
+        if (isReduced()) {
+          orchAnimP = 1;
+          orchFrom = 1;
+          paintOnce(performance.now());
+          return;
+        }
+        orchFrom = 0.06;
+        orchAnimP = 0.06;
+        orchStart = performance.now();
+      };
+
+      const syncDomMeta = () => {
+        const curPrefs = prefs;
+        const themePref = curPrefs.effortTheme || 'auto';
+        const ticksMode = curPrefs.effortTicks || 'highlight';
+        const sel = selectedRow();
+        const selBase = rowModelName(sel);
+        const eng = mt.resolveOrchestratorEngine(curPrefs, selBase);
+        const pal = mt.resolvePalette(selBase);
+        const isDock = eng.kind === 'classic' && eng.style === 'dock';
+        const stageShape = isDock ? 'dock' : eng.shape;
+        const coreRgb = pal.core[0] + ',' + pal.core[1] + ',' + pal.core[2];
+        const previewCard = stageBtn.closest('.fx-preview-card');
+        if (previewCard) {
+          previewCard.dataset.dock = String(isDock);
+          previewCard.dataset.dots = String(curPrefs.showModelDots !== false);
+          previewCard.style.setProperty('--fx-dock-rgb', coreRgb);
+          previewCard.style.setProperty('--fx-dock-accent', pal.accent);
+        }
+        stageBtn.dataset.shape = stageShape;
+        stageBtn.setAttribute('aria-pressed', String(orchOn));
+        const iconSvg = FX_ICONS[curPrefs.orchestratorIcon || 'prism'] || '';
+        const dockBadge = isDock ? '<span class="fx-orch-badge" aria-hidden="true">' + (orchOn ? 'ON' : 'OFF') + '</span>' : '';
+        orchLabel.innerHTML = iconSvg + '<span>Orchestrator</span>' + dockBadge;
+        const onTextColor = eng.kind === 'classic' && eng.style === 'beam' ? pal.accent : '#ffffff';
+        orchLabel.style.color = orchOn ? onTextColor : 'color-mix(in srgb, var(--foreground, CanvasText) 74%, var(--fx-dock-accent))';
+        orchLabel.style.textShadow = orchOn && !(eng.kind === 'classic' && eng.style === 'beam')
+          ? '0 1px 6px rgba(0, 0, 0, 0.55)'
+          : 'none';
+        stageBtn.style.boxShadow = isDock
+          ? 'inset 1px 0 0 rgba(' + coreRgb + ',0.42), inset -1px 0 0 rgba(' + coreRgb + ',0.42), inset 0 1px 0 rgba(' + coreRgb + ',0.42), inset 0 -1px 0 rgba(' + coreRgb + ',0.18), 0 -2px 12px -4px rgba(' + coreRgb + ',0.32)'
+          : orchOn
+            ? '0 2px 12px -2px rgba(' + coreRgb + ',0.45), inset 0 0 0 1px rgba(255,255,255,0.16)'
+            : 'inset 0 0 0 1px rgba(' + coreRgb + ',0.24)';
+
+        const syncTicks = pctNow => {
+          const mode = prefs.effortTicks || 'highlight';
+          const tierIdx = Math.max(0, Math.min(3, Math.round(pctNow * 3)));
+          for (const r of ROWS) {
+            const node = rowNodes[r.id];
+            if (!node) continue;
+            node.ticksWrap.hidden = mode === 'hidden';
+            node.track.setAttribute('aria-valuenow', String(Math.round(pctNow * 100)));
+            node.track.setAttribute('aria-valuetext', TIER_NAMES[tierIdx]);
+            node.ticks.forEach((tk, idx) => {
+              const reached = pctNow + 0.02 >= TICK_STOPS[idx];
+              tk.style.background = mode === 'highlight' && reached
+                ? 'rgba(255, 255, 255, 0.92)'
+                : 'rgba(255, 255, 255, 0.34)';
+              tk.style.opacity = mode === 'highlight' && reached ? '1' : '0.6';
+            });
+          }
+        };
+
+        for (const r of ROWS) {
+          const node = rowNodes[r.id];
+          if (!node) continue;
+          const base = rowModelName(r);
+          const fam = mt.resolveThemeFamily(base, themePref);
+          node.row.dataset.selected = String(r.id === selectedId);
+          node.dot.style.background = mt.dotColorFor(base);
+          node.track.dataset.shape = fam === 'claude' ? 'claude' : 'pill';
+        }
+        syncTicks(smoothPct);
+      };
+
+      const updateTicksVisual = pctNow => {
+        const mode = prefs.effortTicks || 'highlight';
+        const tierIdx = Math.max(0, Math.min(3, Math.round(pctNow * 3)));
+        for (const r of ROWS) {
+          const node = rowNodes[r.id];
+          if (!node) continue;
+          node.track.setAttribute('aria-valuenow', String(Math.round(pctNow * 100)));
+          node.track.setAttribute('aria-valuetext', TIER_NAMES[tierIdx]);
+          if (mode === 'hidden') continue;
+          node.ticks.forEach((tk, idx) => {
+            const reached = pctNow + 0.02 >= TICK_STOPS[idx];
+            tk.style.background = mode === 'highlight' && reached
+              ? 'rgba(255, 255, 255, 0.92)'
+              : 'rgba(255, 255, 255, 0.34)';
+            tk.style.opacity = mode === 'highlight' && reached ? '1' : '0.6';
+          });
+        }
+      };
+
+      const fitCanvas = (cvs, w, h) => {
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const pw = Math.max(1, Math.round(w * dpr));
+        const ph = Math.max(1, Math.round(h * dpr));
+        if (cvs.width !== pw || cvs.height !== ph) {
+          cvs.width = pw;
+          cvs.height = ph;
+        }
+        const ctx = cvs.getContext('2d');
+        if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        return ctx;
+      };
+
+      const paintOnce = now => {
+        const curPrefs = prefs;
+        const themePref = curPrefs.effortTheme || 'auto';
+        const gTheme = curPrefs.geminiTheme || 'physical';
+        const cTheme = curPrefs.claudeTheme || 'matrix';
+        const isFull = curPrefs.effortMotion === 'full';
+        const isLight = isLightSurface();
+        const loopMul = isFull ? 0.74 : 1.25;
+
+        const targetEnergy = energyForPct(targetPct);
+        const dt = lastNow ? Math.min(0.05, Math.max(0.001, (now - lastNow) / 1000)) : 0.016;
+        lastNow = now;
+        if (isReduced()) {
+          smoothPct = targetPct;
+          smoothEnergy = targetEnergy;
+          orchAnimP = orchOn ? 1 : 0;
+        } else {
+          if (!dragging) {
+            const lerpRate = isFull ? 4.2 : 15;
+            const k = 1 - Math.exp(-lerpRate * dt);
+            smoothPct += (targetPct - smoothPct) * k;
+            if (Math.abs(targetPct - smoothPct) < 0.0015) smoothPct = targetPct;
+            smoothEnergy += (targetEnergy - smoothEnergy) * k;
+          }
+          const dur = orchOn ? (isFull ? 720 : 260) : (isFull ? 500 : 185);
+          if (orchStart > 0) {
+            const u = mt.clamp01((now - orchStart) / dur);
+            const eased = mt.easeInOutCubic(u);
+            orchAnimP = orchOn ? orchFrom + (1 - orchFrom) * eased : orchFrom * (1 - eased);
+            if (u >= 1) {
+              orchAnimP = orchOn ? 1 : 0;
+              orchStart = 0;
+            }
+          }
+        }
+        updateTicksVisual(smoothPct);
+        orchPhase += dt * 1.2 * loopMul;
+        fxClock += dt * loopMul;
+        const clock = fxClock;
+
+        const sel = selectedRow();
+        const selBase = rowModelName(sel);
+        const eng = mt.resolveOrchestratorEngine(curPrefs, selBase);
+        const selPal = mt.resolvePalette(selBase);
+        const oRect = stageBtn.getBoundingClientRect();
+        const ow = Math.max(120, Math.round(oRect.width || 240));
+        const oh = 30;
+        const oCtx = fitCanvas(orchCanvas, ow, oh);
+        if (oCtx) {
+          const reach = mt.easeOutCubic(mt.clamp01(orchAnimP * 1.18));
+          const bgReveal = mt.clamp01(orchAnimP * 1.45);
+          const impRaw = orchOn && orchAnimP > 0.62 && orchAnimP < 0.995 ? Math.sin(((orchAnimP - 0.62) / 0.375) * Math.PI) : 0;
+          const impU = mt.clamp01((orchAnimP - 0.62) / 0.38);
+          if (eng.kind === 'classic') {
+            mt.paintOrchestratorClassic(oCtx, {
+              style: eng.style, primaryPal: selPal, w: ow, h: oh, reach, bgReveal, oPhase: orchPhase, clock, energy: smoothEnergy, isLight, motion: curPrefs.effortMotion,
+            });
+          } else {
+            mt.paintOrchestrator3D(oCtx, {
+              engineKey: eng.style,
+              primaryPal: selPal,
+              elementId: selPal.id,
+              w: ow,
+              h: oh,
+              reach,
+              bgReveal,
+              impact: impRaw,
+              impactU: impU,
+              oPhase: orchPhase,
+              clock,
+              energy: smoothEnergy,
+              isLight,
+              motion: curPrefs.effortMotion,
+            });
+          }
+        }
+
+        for (const r of ROWS) {
+          const node = rowNodes[r.id];
+          if (!node) continue;
+          const base = rowModelName(r);
+          const fam = mt.resolveThemeFamily(base, themePref);
+          const pal = mt.resolvePalette(base, themePref);
+          const spd = mt.speedForElement(pal, smoothEnergy) * loopMul;
+          flows[r.id] = (flows[r.id] || 0) + dt * spd;
+          const tRect = node.track.getBoundingClientRect();
+          const tw = Math.max(96, Math.round(tRect.width || 180));
+          const th = 20;
+          const knobW = fam === 'claude' ? 16 : 18;
+          const knobX = knobW * 0.5 + 1 + (tw - knobW - 2) * smoothPct;
+          const fillW = Math.max(10, Math.min(tw, knobX + knobW * 0.35));
+          node.knob.style.left = knobX.toFixed(1) + 'px';
+          const rCtx = fitCanvas(node.canvas, tw, th);
+          if (rCtx) {
+            rCtx.clearRect(0, 0, tw, th);
+            rCtx.save();
+            mt.roundRectPath(rCtx, 0, 0, fillW, th, fam === 'claude' ? 6 : th * 0.5);
+            rCtx.clip();
+            if (fam === 'gemini') {
+              mt.paintGeminiSlider(rCtx, pal, gTheme, tw, th, flows[r.id], clock, smoothEnergy, { glass: true, glassStrength: 0.56 });
+            } else if (fam === 'claude') {
+              mt.paintClaudeSlider(rCtx, pal, cTheme, tw, th, flows[r.id] * 0.72, clock, smoothEnergy, { fillBase: true, glass: true, glassStrength: 0.52 });
+            } else {
+              mt.paintCodexSlider(rCtx, tw, th, flows[r.id], clock, smoothEnergy);
+            }
+            rCtx.restore();
+          }
+        }
+      };
+
+      const loop = now => {
+        if (!active || document.hidden || isReduced()) {
+          rafId = 0;
+          return;
+        }
+        paintOnce(now);
+        rafId = requestAnimationFrame(loop);
+      };
+
+      const start = () => {
+        if (!active || document.hidden) return;
+        syncDomMeta();
+        if (isReduced()) {
+          paintOnce(performance.now());
+          return;
+        }
+        if (!rafId) {
+          lastNow = performance.now();
+          rafId = requestAnimationFrame(loop);
+        }
+      };
+
+      const stop = () => {
+        if (rafId) {
+          cancelAnimationFrame(rafId);
+          rafId = 0;
+        }
+      };
+
+      const pctFromClientX = (trackEl, clientX) => {
+        const rect = trackEl.getBoundingClientRect();
+        const pad = 10;
+        return mt.clamp01((clientX - (rect.left + pad)) / Math.max(1, rect.width - pad * 2));
+      };
+
+      const selectRow = (id, allowCycle) => {
+        const changed = selectedId !== id;
+        if (allowCycle && id === 'claude' && selectedId === 'claude') {
+          claudeSubIdx = (claudeSubIdx + 1) % CLAUDE_MODELS.length;
+        }
+        selectedId = id;
+        syncDomMeta();
+        if (changed || allowCycle) replayOrch();
+        if (isReduced()) paintOnce(performance.now());
+      };
+
+      for (const r of ROWS) {
+        flows[r.id] = 0;
+        const row = document.createElement('div');
+        row.className = 'fx-pv-row';
+        row.dataset.rowId = r.id;
+        row.dataset.selected = String(r.id === selectedId);
+        const nameBtn = document.createElement('button');
+        nameBtn.type = 'button';
+        nameBtn.className = 'fx-pv-row-name';
+        nameBtn.dataset.fxPreview = 'row';
+        const dot = document.createElement('span');
+        dot.className = 'fx-pv-row-dot';
+        const lbl = document.createElement('span');
+        lbl.textContent = r.label;
+        nameBtn.append(dot, lbl);
+        nameBtn.addEventListener('click', () => selectRow(r.id, true));
+
+        const track = document.createElement('div');
+        track.className = 'fx-pv-track';
+        track.setAttribute('role', 'slider');
+        track.setAttribute('tabindex', '0');
+        track.setAttribute('aria-label', r.label);
+        track.setAttribute('aria-valuemin', '0');
+        track.setAttribute('aria-valuemax', '100');
+        const canvas = document.createElement('canvas');
+        canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;display:block;pointer-events:none;';
+        const ticksWrap = document.createElement('span');
+        ticksWrap.className = 'fx-pv-ticks';
+        const ticks = TICK_STOPS.map(pos => {
+          const tk = document.createElement('span');
+          tk.className = 'fx-pv-tick';
+          tk.style.left = 'calc(10px + (100% - 20px) * ' + pos.toFixed(4) + ')';
+          ticksWrap.append(tk);
+          return tk;
+        });
+        const knob = document.createElement('span');
+        knob.className = 'fx-pv-knob';
+        track.append(canvas, ticksWrap, knob);
+
+        let downX = 0;
+        let downPct = targetPct;
+        let moved = false;
+        let activePointer = null;
+        track.addEventListener('pointerdown', event => {
+          if (event.button !== 0) return;
+          event.preventDefault();
+          activePointer = event.pointerId;
+          track.setPointerCapture?.(event.pointerId);
+          dragging = true;
+          moved = false;
+          downX = event.clientX;
+          downPct = pctFromClientX(track, event.clientX);
+          track.dataset.dragging = 'true';
+          if (selectedId !== r.id) selectRow(r.id, false);
+        });
+        track.addEventListener('pointermove', event => {
+          if (activePointer !== event.pointerId) return;
+          if (!moved && Math.abs(event.clientX - downX) > 3) moved = true;
+          if (!moved) return;
+          const p = pctFromClientX(track, event.clientX);
+          targetPct = p;
+          smoothPct = p;
+          smoothEnergy = energyForPct(p);
+          if (isReduced()) paintOnce(performance.now());
+        });
+        const endDrag = event => {
+          if (activePointer !== event.pointerId) return;
+          activePointer = null;
+          dragging = false;
+          delete track.dataset.dragging;
+          const rawPct = moved ? smoothPct : downPct;
+          if (event.type === 'pointerup') {
+            targetPct = Math.round(rawPct * 3) / 3;
+          }
+          if (isReduced()) {
+            smoothPct = targetPct;
+            smoothEnergy = energyForPct(targetPct);
+            paintOnce(performance.now());
+          }
+        };
+        track.addEventListener('pointerup', endDrag);
+        track.addEventListener('pointercancel', endDrag);
+        track.addEventListener('keydown', event => {
+          const curIdx = Math.max(0, Math.min(3, Math.round(targetPct * 3)));
+          let nextIdx = curIdx;
+          if (event.key === 'ArrowRight' || event.key === 'ArrowUp') nextIdx = Math.min(3, curIdx + 1);
+          else if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') nextIdx = Math.max(0, curIdx - 1);
+          else if (event.key === 'Home') nextIdx = 0;
+          else if (event.key === 'End') nextIdx = 3;
+          else return;
+          event.preventDefault();
+          targetPct = TICK_STOPS[nextIdx];
+          if (isReduced()) {
+            smoothPct = targetPct;
+            smoothEnergy = energyForPct(targetPct);
+            paintOnce(performance.now());
+          }
+        });
+
+        row.append(nameBtn, track);
+        rowsHost.append(row);
+        rowNodes[r.id] = { row, nameBtn, dot, track, canvas, ticksWrap, ticks, knob };
+      }
+
+      stageBtn.addEventListener('click', () => {
+        orchOn = !orchOn;
+        orchFrom = orchAnimP;
+        orchStart = performance.now();
+        syncDomMeta();
+        if (isReduced()) {
+          orchAnimP = orchOn ? 1 : 0;
+          orchStart = 0;
+          paintOnce(performance.now());
+        }
+      });
+
+      document.addEventListener('visibilitychange', () => {
+        if (active && !document.hidden) start();
+        else stop();
+      });
+
+      return {
+        setActive(next) {
+          const flag = next && prefs.modelEffortPicker === true;
+          previewCard.inert = prefs.modelEffortPicker !== true;
+          if (next && !flag && !document.hidden) paintOnce(performance.now());
+          if (flag === active) return;
+          active = flag;
+          if (active) {
+            syncDomMeta();
+            start();
+          } else {
+            stop();
+          }
+        },
+        syncPrefs(nextPrefs) {
+          const sig = JSON.stringify([
+            nextPrefs.effortMotion,
+            nextPrefs.effortTheme,
+            nextPrefs.geminiTheme,
+            nextPrefs.claudeTheme,
+            nextPrefs.codexTheme,
+            nextPrefs.orchestratorMode,
+            nextPrefs.orchestrator3dStyle,
+          ]);
+          const changed = fxPrefsSig !== '' && fxPrefsSig !== sig;
+          fxPrefsSig = sig;
+          syncDomMeta();
+          if (active && changed) replayOrch();
+          if (active && isReduced()) paintOnce(performance.now());
+        },
+      };
+    })();
     document.getElementById('row-cached').addEventListener('mouseenter', () => {
       if (lastData) document.getElementById('row-cached').title = presentation.cacheTooltip(lastData, labels, Date.now(), prefs);
     });
@@ -2128,7 +2816,6 @@ const UI_HTML = `<!DOCTYPE html>
     document.addEventListener('keydown', event => {
       if (event.key === 'Escape') for (const setting of document.querySelectorAll('.metric-setting')) setting.dataset.helpDismissed = 'true';
     });
-    let expandModelList = false;
     function applySettings(next, forceInputs = false) {
       prefs = { ...prefs, ...next };
       prefsSig = JSON.stringify(prefs);
@@ -2139,11 +2826,14 @@ const UI_HTML = `<!DOCTYPE html>
       sidebarTabs.setAttribute('aria-label', settingsLabels.sidebarNavigation);
       document.getElementById('sidebar-tab-stats').textContent = settingsLabels.sidebarStats;
       document.getElementById('sidebar-tab-settings').textContent = settingsLabels.sidebarSettings;
+      document.getElementById('sidebar-tab-fx').textContent = settingsLabels.sidebarFx;
       document.getElementById('sidebar-stats').lang = document.body.dataset.language;
       document.getElementById('sidebar-settings').lang = prefs.settingsLanguage;
+      fxSection.lang = prefs.settingsLanguage;
+      fxSection.dataset.nativeCapsule = String(prefs.modelEffortPicker !== true);
       for (const select of document.querySelectorAll('.settings select[name]')) select.value = prefs[select.name];
       for (const checkbox of document.querySelectorAll('.settings input[type="checkbox"][name]')) {
-        const checked = prefs[checkbox.name] === true;
+        const checked = (prefs[checkbox.name] === true) !== (checkbox.name === 'modelEffortPicker');
         checkbox.checked = checked;
         const card = checkbox.closest('[data-setting-card]');
         if (card) card.dataset.checked = String(checked);
@@ -2168,24 +2858,13 @@ const UI_HTML = `<!DOCTYPE html>
       if (speedCard) speedCard.dataset.speedFx = String(prefs.showSpeed !== false && prefs.speedAnimation === true);
       const speedAnimCard = document.querySelector('[data-setting-card="speedAnimation"]');
       if (speedAnimCard) speedAnimCard.dataset.parentOff = String(prefs.showSpeed === false);
-      const modelPickerCard = document.querySelector('[data-setting-card="modelEffortPicker"]');
+      const modelPickerCard = fxSection.querySelector('.setting-model-card');
       if (modelPickerCard) {
         modelPickerCard.dataset.hideModelTags = String(prefs.hideModelTags === true);
         modelPickerCard.dataset.hideDefaultEffort = String(prefs.hideDefaultEffort === true);
-        modelPickerCard.dataset.effortBar = String(prefs.modelEffortPicker === true && prefs.showEffortBar === true);
-        modelPickerCard.dataset.customizeModels = String(prefs.modelEffortPicker === true && prefs.customizeModelList === true && expandModelList === true);
+        modelPickerCard.dataset.showModelDots = String(prefs.showModelDots !== false);
+        modelPickerCard.dataset.effortBar = String(prefs.showEffortBar === true);
       }
-      for (const subKey of ['hideModelTags', 'hideDefaultEffort', 'customizeModelList', 'showEffortBar']) {
-        const subCard = document.querySelector('[data-setting-card="' + subKey + '"]');
-        if (subCard) subCard.dataset.parentOff = String(prefs.modelEffortPicker !== true);
-      }
-      const expandModelCard = document.querySelector('[data-setting-card="expandModelList"]');
-      if (expandModelCard) {
-        expandModelCard.dataset.checked = String(expandModelList === true);
-        expandModelCard.dataset.parentOff = String(prefs.modelEffortPicker !== true || prefs.customizeModelList !== true);
-      }
-      const expandModelInput = document.getElementById('setting-expand-model-list');
-      if (expandModelInput) expandModelInput.checked = expandModelList === true;
       renderModelList();
       for (const card of document.querySelectorAll('.setting-option-card[data-layout-key]')) card.dataset.layout = prefs[card.dataset.layoutKey] === 'rows' ? 'rows' : 'columns';
       const contextPreview = document.querySelector('[data-preview-group="context"]');
@@ -2196,6 +2875,16 @@ const UI_HTML = `<!DOCTYPE html>
       renderFields();
       const turnPreview = document.querySelector('[data-preview-group="turn"]');
       if (turnPreview) turnPreview.dataset.open = String(prefs.showTurnMetrics !== false);
+      const fxGeminiCard = document.getElementById('fx-gemini-card');
+      if (fxGeminiCard) fxGeminiCard.hidden = !(prefs.effortTheme === 'auto' || prefs.effortTheme === 'gemini');
+      const fxClaudeCard = document.getElementById('fx-claude-card');
+      if (fxClaudeCard) fxClaudeCard.hidden = !(prefs.effortTheme === 'auto' || prefs.effortTheme === 'claude');
+      const fxSliderThemes = document.getElementById('fx-slider-themes-card');
+      if (fxSliderThemes) fxSliderThemes.hidden = prefs.effortTheme === 'codex';
+      const fxOrchCustom3dCard = document.getElementById('fx-orch-custom3d-card');
+      if (fxOrchCustom3dCard) fxOrchCustom3dCard.hidden = prefs.orchestratorMode !== 'custom3d';
+      fxPreview.syncPrefs(prefs);
+      fxPreview.setActive(sidebarView === 'fx');
       updateControlState();
       for (const swatch of document.querySelectorAll('[data-pick-setting]')) {
         const active = String(prefs[swatch.dataset.pickSetting] === swatch.dataset.pickValue);
@@ -2225,7 +2914,7 @@ const UI_HTML = `<!DOCTYPE html>
         panelLocked = true;
         document.querySelector('.sidebar-content').style.display = 'none';
         const notice = document.getElementById('panel-auth-notice');
-        notice.textContent = (sidebarView === 'settings' ? settingsLabels : labels).panelAuthFailed;
+        notice.textContent = (sidebarView === 'stats' ? labels : settingsLabels).panelAuthFailed;
         notice.hidden = false;
       }
       if (!res.ok) throw new Error('Panel request failed: HTTP ' + res.status);
@@ -2310,7 +2999,7 @@ const UI_HTML = `<!DOCTYPE html>
           void saveSettings({ [select.name]: clamped });
           return;
         }
-        const value = select.type === 'checkbox' ? select.checked : select.value;
+        const value = select.type === 'checkbox' ? select.checked !== (select.name === 'modelEffortPicker') : select.value;
         const patch = { [select.name]: value };
         if (select.name === 'showSpeed' && !value) patch.speedAnimation = false;
         void saveSettings(patch);
@@ -2324,6 +3013,8 @@ const UI_HTML = `<!DOCTYPE html>
     function renderModelList() {
       const box = document.getElementById('setting-model-list');
       if (!box) return;
+      const boxHidden = prefs.customizeModelList !== true;
+      if (box.hidden !== boxHidden) box.hidden = boxHidden;
       const hidden = Array.isArray(prefs.hiddenModels) ? prefs.hiddenModels : [];
       const all = [...new Set(lastData?.availableModels || [])];
       const emptyLabel = settingsLabels?.modelPickerEmpty || 'Enable the footer capsule and open an existing conversation to list its models.';
@@ -2345,6 +3036,7 @@ const UI_HTML = `<!DOCTYPE html>
         const short = formatModelListName(name);
         const btn = document.createElement('button');
         btn.type = 'button';
+        btn.disabled = savingSettings || prefs.modelEffortPicker !== true;
         btn.className = 'pv-swatch pv-model-item';
         btn.dataset.modelToggle = name;
         btn.dataset.active = String(active);
@@ -2353,13 +3045,6 @@ const UI_HTML = `<!DOCTYPE html>
         if (short !== name) btn.title = name;
         box.append(btn);
       }
-    }
-    const expandModelToggle = document.getElementById('setting-expand-model-list');
-    if (expandModelToggle) {
-      expandModelToggle.addEventListener('change', () => {
-        expandModelList = expandModelToggle.checked;
-        applySettings(prefs);
-      });
     }
     const modelListEl = document.getElementById('setting-model-list');
     if (modelListEl) {
@@ -2655,8 +3340,8 @@ const UI_HTML = `<!DOCTYPE html>
       const hidden = !code || panelLocked;
       if (notice.hidden !== hidden) notice.hidden = hidden;
       if (hidden) return;
-      const dict = sidebarView === 'settings' ? settingsLabels : labels;
-      notice.lang = sidebarView === 'settings' ? prefs.settingsLanguage : document.body.dataset.language;
+      const dict = sidebarView === 'stats' ? labels : settingsLabels;
+      notice.lang = sidebarView === 'stats' ? document.body.dataset.language : prefs.settingsLanguage;
       const badge = document.getElementById('health-code');
       const badgeText = dict.healthCode + ' ' + code;
       if (badge.textContent !== badgeText) badge.textContent = badgeText;
@@ -2710,15 +3395,12 @@ const UI_HTML = `<!DOCTYPE html>
 
     function updateControlState() {
       const busy = savingSettings;
-      for (const control of document.querySelectorAll('.settings select, .settings input, .settings button:not(.setting-help-dot)')) {
+      for (const control of document.querySelectorAll('.settings select, .settings input, .settings button:not(.setting-help-dot):not([data-fx-preview])')) {
         const optionCard = control.closest('.setting-option-card');
         const thresholdCard = control.closest('.setting-threshold-card');
         const detailPop = control.closest('.pv-detail-pop');
-        const modelCard = control.closest('.setting-model-card');
         const parentDisabled = (control.name === 'speedAnimation' && prefs.showSpeed === false)
-          || (['hideModelTags', 'hideDefaultEffort', 'customizeModelList', 'showEffortBar'].includes(control.name) && prefs.modelEffortPicker !== true)
-          || (control.dataset.uiToggle === 'expandModelList' && (prefs.modelEffortPicker !== true || prefs.customizeModelList !== true))
-          || (!!modelCard && !control.closest('.setting-pair-item') && (prefs.modelEffortPicker !== true || prefs.customizeModelList !== true || !expandModelList))
+          || (prefs.modelEffortPicker !== true && control.name !== 'modelEffortPicker' && fxSection.contains(control))
           || (!!optionCard && !control.closest('.setting-pair-item') && optionCard.dataset.checked === 'false')
           || (!!thresholdCard && !control.closest('.setting-pair-item') && thresholdCard.dataset.checked === 'false')
           || (!!detailPop && detailPop.dataset.open === 'false');
@@ -2787,6 +3469,7 @@ if (isMain && (process.env.ANTIGRAVITY_LS_ADDRESS || process.env.ANTIGRAVITY_SID
     needsCloudTelemetry: convId => !resolveConversationDb(convId, false),
     onCloudTelemetry: rememberCloudTelemetry,
     onStatus: state => cdpNotice.observe(state),
+    onEffortSettingsPatch: patch => settingsStore.update(patch),
   });
   let stopping = false;
   const shutdown = async (reason) => {

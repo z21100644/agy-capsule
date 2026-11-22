@@ -220,6 +220,21 @@ test('installs only staged runtime files under the reload marker, rejects concur
   assert.equal(reloads, 1);
 });
 
+test('one-click update preserves a custom Windows Node executable and uses the new manifest', async t => {
+  const instance = fixture(t);
+  const path = join(instance.directory, 'sidecar.json');
+  const command = 'C:\\Program Files\\本地运行时\\node.exe';
+  writeFileSync(path, JSON.stringify({ ...JSON.parse(sidecar), command, ui_config: { old: true } }));
+  const releaseManifest = { ...JSON.parse(sidecar), ui_config: { release: true } };
+  const files = packageFiles();
+  files.set(SIDECAR_PATH + '/sidecar.json', JSON.stringify(releaseManifest));
+
+  const update = instance.updater(async () => new Response(archive(files)));
+
+  assert.deepEqual(await update(latest), { status: 'updated', version: latest });
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { ...releaseManifest, command });
+});
+
 test('a failed file swap restores the previous installation before clearing the marker', async t => {
   const instance = fixture(t);
   const update = instance.updater(async () => new Response(archive()), {

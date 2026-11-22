@@ -88,3 +88,21 @@ test('Windows installer bypasses the wrapper only for non-ASCII executable paths
   assert.equal(readFileSync(installed, 'utf8'), original);
   assert.equal(readFileSync(shippedManifest, 'utf8'), original);
 });
+
+test('Windows manual update from 1.4.4 preserves only the custom Node command', { skip: process.platform !== 'win32' }, t => {
+  const profile = mkdtempSync(join(tmpdir(), 'agy manual update '));
+  t.after(() => rmSync(profile, { recursive: true, force: true }));
+  const plugins = join(profile, '.gemini', 'config', 'plugins');
+  const destination = join(plugins, 'agy-capsule');
+  const pluginManifest = join(destination, 'plugin.json');
+  const installed = join(destination, 'sidecars', 'agy_capsule', 'sidecar.json');
+  const command = 'C:\\Program Files\\本地运行时\\node.exe';
+  mkdirSync(join(destination, 'sidecars', 'agy_capsule'), { recursive: true });
+  writeFileSync(pluginManifest, JSON.stringify({ name: 'agy-capsule', version: '1.4.4' }));
+  writeFileSync(installed, JSON.stringify({ command, args: ['old.mjs'], ui_config: { old: true } }));
+
+  runInstaller('install', plugins, profile);
+
+  assert.deepEqual(JSON.parse(readFileSync(installed, 'utf8')), { ...JSON.parse(readFileSync(shippedManifest, 'utf8')), command });
+  assert.equal(readFileSync(pluginManifest, 'utf8'), readFileSync(new URL('../agy-capsule/plugin.json', import.meta.url), 'utf8'));
+});

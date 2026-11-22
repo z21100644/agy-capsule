@@ -11,7 +11,23 @@ $ErrorActionPreference = 'Stop'
 function Format-Bilingual([string[]]$english, [string[]]$chinese) { (@('[English]') + $english + @('[中文]') + $chinese) -join [Environment]::NewLine }
 function Say([string[]]$english, [string[]]$chinese) { Write-Host (Format-Bilingual $english $chinese) }
 
-function Set-InstalledSidecarCommand([string]$manifestPath) {
+function Get-CustomNodeCommand([string]$manifestPath) {
+    try {
+        $command = (Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json).command
+    } catch { return }
+    # Keep only a fully qualified Windows Node path, not a bare or drive-relative command.
+    if ($command -is [string] -and $command -match '^(?:[a-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+[\\/])(?:.*[\\/])?node\.exe\z') {
+        return $command
+    }
+}
+
+function Set-InstalledSidecarCommand([string]$manifestPath, [string]$customNode) {
+    if ($customNode) {
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $manifest.command = $customNode
+        [IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 20) + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+        return
+    }
     # Read the host's UTF-8 wrapper as text: cmd.exe can misread non-ASCII paths in it.
     try {
         $wrapper = Get-Content -LiteralPath (Join-Path $env:APPDATA 'Antigravity\bin\agy-node.cmd') -Encoding UTF8 -Raw
@@ -72,13 +88,15 @@ if (-not (Test-Path -LiteralPath (Join-Path $source 'plugin.json'))) {
     throw (Format-Bilingual "Source plugin manifest missing: $source\plugin.json" "缺少源插件清单：$source\plugin.json")
 }
 if ($source -eq $destination) { throw (Format-Bilingual 'Source and destination must be different directories.' '源目录和目标目录不能相同。') }
+$installedSidecar = Join-Path $destination 'sidecars\agy_capsule\sidecar.json'
+$customNode = Get-CustomNodeCommand $installedSidecar
 New-Item -ItemType Directory -Path $destination -Force | Out-Null
 $marker = Join-Path $destination '.update-in-progress'
 Set-Content -LiteralPath $marker -Value 'Updating agy-capsule' -Encoding ASCII
 try {
     & robocopy.exe $source $destination /MIR /XJ /XF .update-in-progress /NFL /NDL /NJH /NJS /NP /R:2 /W:1
     if ($LASTEXITCODE -ge 8) { throw (Format-Bilingual "Plugin copy failed (robocopy exit code $LASTEXITCODE)." "插件复制失败（robocopy 退出码 $LASTEXITCODE）。") }
-    Set-InstalledSidecarCommand (Join-Path $destination 'sidecars\agy_capsule\sidecar.json')
+    Set-InstalledSidecarCommand $installedSidecar $customNode
 } finally {
     Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
 }

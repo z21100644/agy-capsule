@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'no
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-export const DEFAULT_SETTINGS = Object.freeze({ language: 'en', settingsLanguage: 'zh-CN', uiSkin: 'native', panelLayout: 'natural', density: 'compact', quotaIndicator: 'ring', cacheIndicator: 'icon', cacheHitFormat: 'percent', labelCase: 'lowercase', resetFormat: 'compact', popAnimation: false, contextLayout: 'columns', turnLayout: 'columns', contextMarker: 'square', turnMarker: 'square', showContextBreakdown: true, columnLabel: true, columnValue: true, columnPercent: false, columnOrder: 'label,value,percent', highlightContextHover: false, highlightActiveModel: false, modelEffortPicker: false, showEffortBar: false, hideModelTags: false, hideDefaultEffort: false, customizeModelList: false, hiddenModels: Object.freeze([]), hideUnavailableQuota: true, showQuotaDividers: true, showCacheWarnings: true, cacheWarnMin: 3, cacheColdMin: 4, showContextWarnings: true, showRequestErrors: true, notifyCdpRestart: true, notifyUpdates: true, showSpeed: true, speedAnimation: false, showRequestMetrics: true, compactTelemetryBar: false, telemetryBarPosition: 'bottom', showTurnMetrics: false, showQueueWarnings: true, queueWarnSec: 30, showUsageActivity: false, showModelUsage: false });
+export const DEFAULT_SETTINGS = Object.freeze({ language: 'en', settingsLanguage: 'zh-CN', uiSkin: 'native', panelLayout: 'natural', density: 'compact', quotaIndicator: 'ring', cacheIndicator: 'icon', cacheHitFormat: 'percent', labelCase: 'lowercase', resetFormat: 'compact', popAnimation: false, contextLayout: 'columns', turnLayout: 'columns', contextMarker: 'square', turnMarker: 'square', showContextBreakdown: true, columnLabel: true, columnValue: true, columnPercent: false, columnOrder: 'label,value,percent', highlightContextHover: false, highlightActiveModel: false, modelEffortPicker: false, showEffortBar: false, hideModelTags: false, hideDefaultEffort: false, customizeModelList: false, hiddenModels: Object.freeze([]), hideUnavailableQuota: true, showQuotaDividers: true, showCacheWarnings: true, cacheWarnMin: 3, cacheColdMin: 4, showContextWarnings: true, showRequestErrors: true, notifyCdpRestart: true, notifyUpdates: true, showSpeed: true, speedAnimation: false, showRequestMetrics: true, compactTelemetryBar: false, telemetryBarPosition: 'bottom', showTurnMetrics: false, showQueueWarnings: true, queueWarnSec: 30, showUsageActivity: false, showModelUsage: false, effortMotion: 'fast', effortTicks: 'highlight', showModelDots: true, effortTheme: 'auto', geminiTheme: 'physical', claudeTheme: 'matrix', codexTheme: 'nebula', orchestratorMode: 'follow', orchestrator3dStyle: 'helix', orchestratorIcon: 'prism' });
 const choices = {
   language: ['en', 'zh-CN', 'zh-TW'],
   settingsLanguage: ['en', 'zh-CN', 'zh-TW'],
@@ -47,6 +47,16 @@ const choices = {
   showQueueWarnings: [true, false],
   showUsageActivity: [true, false],
   showModelUsage: [true, false],
+  effortMotion: ['fast', 'full'],
+  effortTicks: ['highlight', 'dim', 'hidden'],
+  showModelDots: [true, false],
+  effortTheme: ['auto', 'gemini', 'claude', 'codex'],
+  geminiTheme: ['physical', 'ribbon', 'nebula'],
+  claudeTheme: ['matrix', 'bars', 'spark'],
+  codexTheme: ['nebula', 'beam', 'orb'],
+  orchestratorMode: ['follow', 'dock', 'custom3d'],
+  orchestrator3dStyle: ['chamber', 'helix', 'orbital', 'c-matrix', 'c-louver', 'c-spark', 'nebula', 'beam', 'orb'],
+  orchestratorIcon: ['prism', 'gravity', 'semicircle', 'none'],
 };
 const numericRanges = {
   cacheWarnMin: [1, 998],

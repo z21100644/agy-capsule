@@ -51,7 +51,7 @@ test('child reads never move the main sidebar and alerts stay in the child execu
   writeFileSync(join(settingsDir, 'settings.json'), JSON.stringify({ showTurnMetrics: true }));
   const mockedHome = t.mock.method(os, 'homedir', () => profile);
   syncBuiltinESMExports();
-  const { inspectConversation, readConversationSnapshot, rememberCloudTelemetry, startPanel } = await import('../agy-capsule/sidecars/agy_capsule/server.mjs?child-fixture')
+  const { inspectConversation, readConversationSnapshot, rememberCloudTelemetry, startPanel, UI_HTML } = await import('../agy-capsule/sidecars/agy_capsule/server.mjs?child-fixture')
     .finally(() => { mockedHome.mock.restore(); syncBuiltinESMExports(); });
   const dir = join(profile, 'conversations');
   mkdirSync(dir);
@@ -115,7 +115,7 @@ test('child reads never move the main sidebar and alerts stay in the child execu
   assert.equal(full.contextTokens, 150, 'Full View supplies the child ID even without a composer');
   assert.deepEqual(full.turnMetrics, data.turnMetrics, 'the sidebar and the child capsule share the same turn');
   assert.deepEqual(full.turnSpeed, data.turnSpeed);
-  assert.equal(full.uiVersion, 142);
+  assert.equal(full.uiVersion, Number(UI_HTML.match(/d\.uiVersion !== (\d+)/)?.[1]), 'the response and panel agree on when to reload');
   assert.equal((await postContext({ conversationId: 'empty-child' })).turnMetrics, null);
   assert.equal((await postContext({ conversationId: 'missing' })).contextTokens, 0, 'no parent fallback for a missing child DB');
   assert.equal((await postContext({ conversationId: '' })).contextTokens, 0, 'an explicitly empty view must not display an old chat');
