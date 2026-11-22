@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { createPresentation, getPresentationScript } from '../agy-capsule/sidecars/agy_capsule/ui.mjs';
-import { buildRuntimeBundle, toView } from '../agy-capsule/sidecars/agy_capsule/deck_injector.mjs';
+import { buildRuntimeBundle, readCompactionEstimate, toView } from '../agy-capsule/sidecars/agy_capsule/deck_injector.mjs';
 import { UI_HTML } from '../agy-capsule/sidecars/agy_capsule/server.mjs';
 
 test('contextBreakdown preserves four-category arithmetic, widths, and missing-limit fallbacks', () => {
@@ -104,6 +104,32 @@ test('shared quota helpers match colors, SVG ring sizes, labels, sorting, and we
   assert.equal(groups[0].buckets[0].color, '#4ea84e');
   assert.equal(groups[0].buckets[1].color, '#f59e0b');
   assert.deepEqual(ui.quotaView(null), []);
+});
+
+test('the visible conversation can show a compaction estimate without reusing the previous request breakdown', () => {
+  const ui = createPresentation();
+  const hostState = {
+    conversationId: 'chat',
+    contextWindowUsage: { estimatedAfterCompaction: true, estimatedTokensUsed: 25000, maxContextTokens: 100000, generatorMetadataIndex: 4 },
+  };
+  const provider = { getState: () => hostState };
+  const footer = { __reactFiber$fixture: { return: { dependencies: { firstContext: {
+    memoizedValue: { getAgentStates: () => new Map([['chat', { provider }], ['other', { provider }]]) },
+  } } } } };
+  assert.equal(readCompactionEstimate(footer, 'other'), null);
+  const contextEstimate = readCompactionEstimate(footer, 'chat');
+  assert.deepEqual(contextEstimate, { tokens: 25000, limit: 100000, generatorMetadataIndex: 4 });
+  const data = { contextTokens: 85000, maxContextTokens: 100000, cachedIn: 65000, turn0Tokens: 60000, contextEstimate };
+  const view = toView(data);
+  assert.equal(view.pillCtx, '25%');
+  assert.equal(view.segEstimateW, '25.00%');
+  assert.equal(view.segReadW, '0.00%');
+  assert.equal(view.segTurn0W, '0.00%');
+  assert.equal(view.cache.cachedIn, 65000, 'real request metrics are not overwritten');
+  assert.match(ui.contextTooltips(view.contextData).overview, /estimate after compaction/);
+  assert.equal(ui.alertView(view.contextData).contextTone, '');
+  hostState.contextWindowUsage.estimatedAfterCompaction = false;
+  assert.equal(readCompactionEstimate(footer, 'chat'), null);
 });
 
 test('reinjecting the footer replaces the v1.2.3 presentation in the same page', () => {

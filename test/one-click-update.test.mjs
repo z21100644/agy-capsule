@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -8,6 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { gzipSync } from 'node:zlib';
 import { downloadArchive, readRuntimeArchive, SIDECAR_PATH } from '../agy-capsule/sidecars/agy_capsule/update_archive.mjs';
 import { createPluginUpdater } from '../agy-capsule/sidecars/agy_capsule/version_update.mjs';
+import { createVersionChecker } from '../agy-capsule/sidecars/agy_capsule/version_check.mjs';
 import { startSelfReloadWatcher } from '../agy-capsule/sidecars/agy_capsule/reload.mjs';
 
 const latest = '1.2.0';
@@ -117,6 +120,42 @@ test('tarball validates every redirect and the final HTTPS download host', async
   await assert.rejects(downloadArchive(archiveUrl, { fetchImpl: async () => redirected }), { reason: 'redirect' });
 });
 
+test('one-click update revalidates a recent manual result before downloading', async t => {
+  const instance = fixture(t);
+  let checks = 0;
+  const checkVersion = createVersionChecker({
+    currentVersion: '1.1.0', now: () => 1000,
+    fetchImpl: async () => Response.json({ tag_name: ++checks === 1 ? 'v' + latest : 'v1.2.1' }),
+  });
+  const updater = instance.updater(() => assert.fail('a changed release must not download'), { checkVersion });
+  assert.equal((await checkVersion('manual')).latestVersion, latest);
+  assert.equal((await checkVersion('manual')).latestVersion, latest);
+  assert.equal(checks, 1);
+  assert.deepEqual(await updater(latest), { status: 'error', reason: 'releaseChanged', diagnostics: { step: 'verify-release' } });
+  assert.equal(checks, 2, 'installer skips the short and the long cache');
+  instance.unchanged();
+});
+
+test('one-click update returns the shared rate limit deadline without downloading', async t => {
+  const instance = fixture(t);
+  let checks = 0, downloads = 0;
+  const checkVersion = createVersionChecker({
+    currentVersion: '1.1.0', now: () => 1000,
+    fetchImpl: async () => {
+      checks++;
+      return new Response('', { status: 429, headers: { 'Retry-After': '300' } });
+    },
+  });
+  const updater = instance.updater(() => { downloads++; throw new Error('unexpected download'); }, { checkVersion });
+  const limited = await checkVersion('manual');
+  assert.deepEqual(await updater(latest), {
+    status: 'error', reason: 'rateLimit', retryAt: limited.retryAt, diagnostics: { step: 'verify-release' },
+  });
+  assert.equal(checks, 1);
+  assert.equal(downloads, 0);
+  instance.unchanged();
+});
+
 test('compressed and extracted size limits and network deadline are enforced', async t => {
   await assert.rejects(downloadArchive(archiveUrl, {
     maxBytes: 3, fetchImpl: async () => new Response('a', { headers: { 'Content-Length': 4 } }),
@@ -156,7 +195,7 @@ test('invalid downloads and invalid archives never touch the live plugin', async
   ];
   for (const [fetchImpl, reason] of cases) {
     const result = await instance.updater(fetchImpl)(latest);
-    assert.deepEqual(result, { status: 'error', reason });
+    assert.deepEqual(result, { status: 'error', reason, diagnostics: { step: reason === 'redirect' ? 'download' : 'validate-archive' } });
     instance.unchanged();
   }
 });
@@ -164,16 +203,17 @@ test('invalid downloads and invalid archives never touch the live plugin', async
 test('declines downgrades, a changed release, a pending marker and a source checkout before downloading', async t => {
   const instance = fixture(t, '2.0.0');
   const neverFetch = async () => assert.fail('must not fetch');
-  assert.deepEqual(await instance.updater(neverFetch)(latest), { status: 'error', reason: 'releaseChanged' });
-  assert.deepEqual(await instance.updater(neverFetch)('2.5.0'), { status: 'error', reason: 'releaseChanged' });
-  assert.deepEqual(await instance.updater(neverFetch)('https://not-a-release.example/'), { status: 'error', reason: 'releaseChanged' });
+  const update = instance.updater(neverFetch);
+  assert.deepEqual(await update(latest), { status: 'error', reason: 'releaseChanged', diagnostics: { step: 'verify-release' } });
+  assert.deepEqual(await update('2.5.0'), { status: 'error', reason: 'releaseChanged', diagnostics: { step: 'verify-release' } });
+  assert.deepEqual(await update('https://not-a-release.example/'), { status: 'error', reason: 'releaseChanged', diagnostics: { step: 'start' } });
   instance.unchanged();
   writeFileSync(instance.marker, 'other installer');
-  assert.deepEqual(await instance.updater(neverFetch)(latest), { status: 'error', reason: 'busy' });
+  assert.deepEqual(await update(latest), { status: 'error', reason: 'busy', diagnostics: { step: 'inspect' } });
   assert.equal(readFileSync(instance.marker, 'utf8'), 'other installer');
   rmSync(instance.marker);
   mkdirSync(join(instance.temp, '.git'));
-  assert.deepEqual(await instance.updater(neverFetch)(latest), { status: 'error', reason: 'notInstalled' });
+  assert.deepEqual(await update(latest), { status: 'error', reason: 'notInstalled', diagnostics: { step: 'inspect' } });
   instance.unchanged();
 });
 
@@ -202,7 +242,7 @@ test('installs only staged runtime files under the reload marker, rejects concur
   const running = update(latest);
   await downloading;
   instance.unchanged();
-  assert.deepEqual(await update(latest), { status: 'error', reason: 'busy' });
+  assert.deepEqual(await update(latest), { status: 'error', reason: 'busy', diagnostics: { step: 'start' } });
   respond(new Response(archive()));
   assert.deepEqual(await running, { status: 'updated', version: latest });
   assert.equal(readFileSync(join(root, 'plugin.json'), 'utf8'), manifest(latest));
@@ -220,6 +260,46 @@ test('installs only staged runtime files under the reload marker, rejects concur
   assert.equal(reloads, 1);
 });
 
+test('Windows can update and roll back while the running sidecar holds its working directory', { skip: process.platform !== 'win32' }, async t => {
+  const instance = fixture(t);
+  const { directory, marker, root, settings, pluginsDirectory } = instance;
+  const child = spawn(process.execPath, ['-e', 'console.log("ready"); setInterval(() => {}, 1000)'], {
+    cwd: directory, stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true,
+  });
+  const exited = once(child, 'exit');
+  try {
+    await once(child.stdout, 'data');
+    await assert.rejects(rename(directory, join(root, 'check-lock')), { code: 'EBUSY' });
+
+    const fetch = async () => new Response(archive());
+    const failing = instance.updater(fetch, {
+      move: (from, to) => {
+        assert.equal(existsSync(marker), true);
+        if (to === join(directory, 'server.mjs') && from.includes(join('next', SIDECAR_PATH))) {
+          throw Object.assign(new Error('simulated failure installing a staged file'), { code: 'EACCES' });
+        }
+        return rename(from, to);
+      },
+    });
+    assert.deepEqual(await failing(latest), {
+      status: 'error', reason: 'permission', diagnostics: { step: 'replace', code: 'EACCES', path: SIDECAR_PATH, restored: true },
+    });
+    instance.unchanged();
+
+    assert.deepEqual(await instance.updater(fetch)(latest), { status: 'updated', version: latest });
+    assert.equal(child.exitCode, null, 'the running sidecar still holds the directory');
+    assert.equal(readFileSync(join(root, 'plugin.json'), 'utf8'), manifest(latest));
+    assert.match(readFileSync(join(directory, 'server.mjs'), 'utf8'), /program\.mjs/);
+    assert.equal(existsSync(join(directory, 'stale.mjs')), false);
+    assert.equal(existsSync(marker), false);
+    assert.deepEqual(readdirSync(pluginsDirectory), ['agy-capsule']);
+    assert.equal(readFileSync(settings, 'utf8'), '{"notifyUpdates":false}');
+  } finally {
+    child.kill();
+    await exited;
+  }
+});
+
 test('one-click update preserves a custom Windows Node executable and uses the new manifest', async t => {
   const instance = fixture(t);
   const path = join(instance.directory, 'sidecar.json');
@@ -235,16 +315,41 @@ test('one-click update preserves a custom Windows Node executable and uses the n
   assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { ...releaseManifest, command });
 });
 
-test('a failed file swap restores the previous installation before clearing the marker', async t => {
+test('a failed swap restores the previous installation and reports only safe diagnostics', async t => {
+  for (const [code, reason] of [['EACCES', 'permission'], ['EBUSY', 'locked'], ['EPERM', 'install']]) {
+    const instance = fixture(t);
+    const update = instance.updater(async () => new Response(archive()), {
+      move: (from, to) => {
+        if (to === join(instance.root, 'plugin.json') && from.includes(join('next', 'plugin.json'))) {
+          throw Object.assign(new Error(`simulated error from ${from} to ${to}`), { code, path: from, dest: to });
+        }
+        return rename(from, to);
+      },
+    });
+    assert.deepEqual(await update(latest), {
+      status: 'error', reason, diagnostics: { step: 'replace', code, path: 'plugin.json', restored: true },
+    });
+    instance.unchanged();
+  }
+});
+
+test('a failed rollback preserves the backup and reports the rollback failure', async t => {
   const instance = fixture(t);
   const update = instance.updater(async () => new Response(archive()), {
     move: (from, to) => {
-      if (to === join(instance.root, 'plugin.json') && from.includes(join('next', 'plugin.json'))) throw new Error('simulated denied rename');
+      if (to === join(instance.root, 'plugin.json')) {
+        const code = from.includes(join('previous', 'plugin.json')) ? 'EACCES' : 'EBUSY';
+        throw Object.assign(new Error(`simulated error from ${from}`), { code });
+      }
       return rename(from, to);
     },
   });
-  assert.deepEqual(await update(latest), { status: 'error', reason: 'install' });
-  instance.unchanged();
+  assert.deepEqual(await update(latest), {
+    status: 'error', reason: 'recovery', diagnostics: { step: 'rollback', code: 'EACCES', path: 'plugin.json' },
+  });
+  assert.equal(existsSync(instance.marker), true);
+  const backup = readdirSync(instance.pluginsDirectory).find(dir => dir.startsWith('.agy-capsule-update-'));
+  assert.equal(readFileSync(join(instance.pluginsDirectory, backup, 'previous', 'plugin.json'), 'utf8'), manifest('1.1.0'));
 });
 
 test('a directory occupying an optional runtime file path is left intact', async t => {
@@ -252,7 +357,9 @@ test('a directory occupying an optional runtime file path is left intact', async
   const localFile = join(instance.root, 'THIRD-PARTY-NOTICES.md', 'local.txt');
   mkdirSync(dirname(localFile));
   writeFileSync(localFile, 'keep this file');
-  assert.deepEqual(await instance.updater(async () => new Response(archive()))(latest), { status: 'error', reason: 'install' });
+  assert.deepEqual(await instance.updater(async () => new Response(archive()))(latest), {
+    status: 'error', reason: 'pathConflict', diagnostics: { step: 'replace', path: 'THIRD-PARTY-NOTICES.md', restored: true },
+  });
   assert.equal(readFileSync(localFile, 'utf8'), 'keep this file');
   instance.unchanged();
 });

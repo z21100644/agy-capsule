@@ -8,9 +8,18 @@ Context usage, multi-model quotas, cache status and generation speed in the Anti
   <img src="assets/readme/hero.gif" width="100%" alt="Hovering the context, quota and request-failure capsules in turn to open their panels" />
 </p>
 
-Promo video (v1.1, also on [Bilibili](https://www.bilibili.com/video/BV1ggsy6rEQM/)):
+Promo video (v1.4, also on [Bilibili](https://www.bilibili.com/video/BV1bayvz5Ey1/)):
+
+https://github.com/user-attachments/assets/3857a452-9fac-42b0-8f26-57759af8fefc
+
+<details>
+<summary>Earlier promo video (v1.1)</summary>
+
+Also on [Bilibili](https://www.bilibili.com/video/BV1ggsy6rEQM/):
 
 https://github.com/user-attachments/assets/9f5bf1c6-1284-4e17-a380-defdee83f60c
+
+</details>
 
 Almost every feature in this plugin is highly customizable, from a minimal footer to a full-featured monitor — items marked with `☑` below can be freely toggled or configured in sidebar [Settings](#settings).
 
@@ -102,11 +111,20 @@ An optional section at the bottom of the sidebar’s Statistics page.
 
 - **Panel pop-in animation (off by default)**: Panels fade and rise slightly as they open. It never plays while the system asks for reduced motion.
 
+### Chinese localization for Antigravity
+
+To translate Antigravity itself, choose one of these third-party patches. Each was tested separately on **Windows with Antigravity 2.34.0**. The agy-capsule sidebar and footer both kept their own language settings.
+
+- **Recommended**: [Antigravity-Chinese-Localization v2.34.0](https://github.com/antigravity-cn-community/Antigravity-Chinese-Localization/releases/tag/v2.34.0).
+- **Also tested and compatible**: [antigravity2-cn (commit `f7a0c4e`)](https://github.com/qqxpee/antigravity2-cn/tree/f7a0c4ebe088917bdc5121ac9b3bbad1c89b6059).
+
+If you run into a compatibility issue, please [report it on GitHub](https://github.com/Lumidarin/agy-capsule/issues). Include your Antigravity, agy-capsule, and localization patch versions, and where the problem appears so we can reproduce and follow up.
+
 ## Settings
 
 Open **… → Extensions → agy-capsule** from the conversation header, then use the Statistics, Settings, and Models tabs at the top.
 
-The **Settings** tab shows the installed version, an **Update alerts** switch (on by default), and a **Check updates** button. Turning alerts off stops background checks but leaves manual checks available. When a new release is available, the card shows the installed and new versions. Click **Update** to download, verify, and reload the plugin without restarting Antigravity or losing your settings. Click **Release notes** to open the GitHub release, or × to dismiss. If an update fails, the card shows why and offers **Retry** and **Manual update**.
+The **Settings** tab shows the installed version, an **Update alerts** switch (on by default), and a **Check updates** button. Turning alerts off stops background checks but leaves manual checks available. When a new release is available, the card shows the installed and new versions. Click **Update** to download, verify, and reload the plugin without restarting Antigravity or losing your settings. Click **Release notes** to open the GitHub release, or × to dismiss. If an update fails, the card shows why and offers **Retry**, **Manual update**, and **Copy diagnostics**. Use **Copy AI prompt** to send the update steps and diagnostics to an AI assistant.
 
 Preferences live in <code>~/.gemini/config/agy-capsule/settings.json</code> (<code>%USERPROFILE%\.gemini\config\agy-capsule\settings.json</code> on Windows). Updates and uninstalls keep them; options missing from older files fall back to defaults.
 

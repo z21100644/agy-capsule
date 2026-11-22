@@ -1,9 +1,23 @@
 import { readFileSync } from 'node:fs';
 
 export const REPO = 'Lumidarin/agy-capsule';
-const RELEASES_URL = `https://github.com/${REPO}/releases`;
+export const RELEASES_URL = `https://github.com/${REPO}/releases`;
 const LATEST_RELEASE_API = `https://api.github.com/repos/${REPO}/releases/latest`;
 export const VERSION_ROUTE = '/api/version';
+const maxUnspecifiedRateLimits = 4;
+const manualDedupeMs = 5000;
+
+function getRetryAt(headers, now) {
+  const readDeadline = (name, offset = 0) => {
+    const seconds = headers.get(name);
+    if (!/^\d+$/.test(seconds)) return 0;
+    const deadline = offset + Number(seconds) * 1000;
+    return deadline > now && Number.isFinite(new Date(deadline).getTime()) ? deadline : 0;
+  };
+  const retryAt = readDeadline('retry-after', now);
+  const resetAt = headers.get('x-ratelimit-remaining') === '0' ? readDeadline('x-ratelimit-reset') : 0;
+  return Math.max(retryAt, resetAt) || null;
+}
 
 export function parseVersion(value) {
   if (typeof value !== 'string') return null;
@@ -48,7 +62,9 @@ export function createVersionChecker({
 } = {}) {
   let cached = null;
   let nextAutoAt = 0;
+  let manualReuseUntil = 0;
   let inFlight = null;
+  let unspecifiedRateLimits = 0;
   const result = (status, fields) => ({ status, currentVersion, ...fields });
   const error = (reason, fields) => result('error', { reason, ...fields });
   async function load() {
@@ -59,8 +75,11 @@ export function createVersionChecker({
         redirect: 'error', signal,
       });
       if (!res.ok) {
-        if (res.status === 429 || (res.status === 403 && (res.headers?.get('retry-after') || res.headers?.get('x-ratelimit-remaining') === '0'))) {
-          return error('rateLimit');
+        if (res.status === 429 || (res.status === 403 && (
+          res.headers.get('retry-after') || res.headers.get('x-ratelimit-remaining') === '0'
+          || /\bsecondary rate limit\b/i.test((await res.json().catch(() => null))?.message || '')
+        ))) {
+          return error('rateLimit', { retryAt: getRetryAt(res.headers, now()) });
         }
         if (res.status === 404) return error('noRelease');
         return error('http', { httpStatus: res.status });
@@ -76,20 +95,36 @@ export function createVersionChecker({
       return error(signal.aborted || err?.name === 'TimeoutError' ? 'timeout' : err instanceof SyntaxError ? 'invalidRelease' : 'network');
     }
   }
-  return async function check(mode) {
+  return async function check(mode, { fresh = false } = {}) {
     if (!['manual', 'auto'].includes(mode)) return error('invalidMode');
     const automatic = mode === 'auto';
     const enabled = () => getPrefs?.()?.notifyUpdates === true;
     if (automatic && !enabled()) return result('disabled');
     if (!parseVersion(currentVersion)) return automatic ? result('idle') : error('localVersion');
+    if (cached?.reason === 'rateLimit' && (
+      now() < cached.retryAt || (automatic && unspecifiedRateLimits >= maxUnspecifiedRateLimits)
+    )) return automatic ? result('idle') : cached;
+    const dedupeManual = !automatic && !fresh;
+    // Reuse only a recent manual check, not the background cache. An in-flight
+    // fetch may contain newer information, so prefer waiting for it.
+    if (dedupeManual && !inFlight && cached && cached.reason !== 'rateLimit' && now() < manualReuseUntil) {
+      return cached;
+    }
     if (!inFlight && (!automatic || !cached || now() >= nextAutoAt)) {
       inFlight = load().then(value => {
+        unspecifiedRateLimits = value.reason === 'rateLimit' && value.retryAt === null
+          ? Math.min(unspecifiedRateLimits + 1, maxUnspecifiedRateLimits) : 0;
+        if (value.reason === 'rateLimit') {
+          const retryAt = value.retryAt ?? (now() + 60_000 * 2 ** (unspecifiedRateLimits - 1));
+          value = { ...value, retryAt };
+        }
         cached = value;
-        nextAutoAt = now() + (value.status === 'error' ? failureTtlMs : successTtlMs);
+        nextAutoAt = value.retryAt ?? (now() + (value.status === 'error' ? failureTtlMs : successTtlMs));
         return value;
       }).finally(() => { inFlight = null; });
     }
     const value = await (inFlight || cached);
+    if (dedupeManual && value.reason !== 'rateLimit') manualReuseUntil = now() + manualDedupeMs;
     if (automatic && !enabled()) return result('disabled');
     return automatic && value.status === 'error' ? result('idle') : value;
   };

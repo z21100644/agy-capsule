@@ -62,7 +62,7 @@ test('automatic check is gated by saved prefs and shares the in-flight request a
   assert.equal((await immediate).latestVersion, '1.2.6');
 });
 
-test('manual checks bypass the TTL, identify latest/up-to-date and give safe error reasons', async () => {
+test('manual checks bypass the normal TTL, identify versions and give safe error reasons', async () => {
   let calls = 0, now = 0, answer = () => release('v1.2.3');
   const check = createVersionChecker({
     currentVersion: '1.2.3', getPrefs: () => ({ notifyUpdates: true }), now: () => now, failureTtlMs: 10,
@@ -74,32 +74,120 @@ test('manual checks bypass the TTL, identify latest/up-to-date and give safe err
       return answer();
     },
   });
+  const nextManual = () => { now += 5000; return check('manual'); };
   assert.equal((await check('manual')).status, 'current');
   answer = () => release('v1.10.0');
-  assert.deepEqual(await check('manual'), {
+  assert.deepEqual(await nextManual(), {
     status: 'update', currentVersion: '1.2.3', latestVersion: '1.10.0', releaseTag: 'v1.10.0',
     releaseUrl: 'https://github.com/Lumidarin/agy-capsule/releases/tag/v1.10.0',
   });
   answer = () => { throw new Error('internal network details'); };
-  assert.deepEqual(await check('manual'), { status: 'error', currentVersion: '1.2.3', reason: 'network' });
+  assert.deepEqual(await nextManual(), { status: 'error', currentVersion: '1.2.3', reason: 'network' });
   assert.equal((await check('auto')).status, 'idle');
   assert.equal(calls, 3);
-  now = 10;
+  now += 10;
   answer = () => new Response('', { status: 403, headers: { 'X-RateLimit-Remaining': '0' } });
   assert.equal((await check('auto')).status, 'idle');
   assert.equal(calls, 4);
   assert.equal((await check('manual')).reason, 'rateLimit');
+  assert.equal(calls, 4, 'manual checks share the limit cooldown');
+  now += 60_000;
   answer = () => new Response('', { status: 404 });
   assert.equal((await check('manual')).reason, 'noRelease');
   answer = () => new Response('', { status: 503 });
-  assert.equal((await check('manual')).httpStatus, 503);
+  assert.equal((await nextManual()).httpStatus, 503);
   answer = () => release('not-a-version');
-  assert.equal((await check('manual')).reason, 'invalidRelease');
+  assert.equal((await nextManual()).reason, 'invalidRelease');
   answer = () => release('v2.0.0-rc.1');
-  assert.equal((await check('manual')).reason, 'invalidRelease');
+  assert.equal((await nextManual()).reason, 'invalidRelease');
   answer = () => { throw new DOMException('test deadline', 'TimeoutError'); };
-  assert.equal((await check('manual')).reason, 'timeout');
+  assert.equal((await nextManual()).reason, 'timeout');
   assert.equal((await check()).reason, 'invalidMode');
+});
+
+test('manual checks reuse a completed check for five seconds without sliding the deadline', async () => {
+  let now = 100, calls = 0;
+  const check = createVersionChecker({
+    currentVersion: '1.2.3', now: () => now, getPrefs: () => ({ notifyUpdates: true }),
+    fetchImpl: async () => {
+      calls++;
+      if (calls === 3) throw new Error('network unavailable');
+      return release('v1.2.' + (3 + calls));
+    },
+  });
+  assert.equal((await check('auto')).latestVersion, '1.2.4');
+  assert.equal((await check('manual')).latestVersion, '1.2.5', 'a recent background check alone does not suppress a manual check');
+  now = 5099;
+  assert.equal((await check('manual')).latestVersion, '1.2.5');
+  assert.equal(calls, 2);
+  now = 5100;
+  assert.equal((await check('manual')).reason, 'network');
+  now = 5101;
+  assert.equal((await check('manual')).reason, 'network', 'immediate retries also reuse ordinary failures');
+  assert.equal(calls, 3);
+  now = 10100;
+  assert.equal((await check('manual')).latestVersion, '1.2.7');
+  assert.equal(calls, 4);
+});
+
+test('an expired rate limit does not linger in the manual reuse window', async () => {
+  let now = 100, calls = 0;
+  const check = createVersionChecker({
+    currentVersion: '1.2.3', now: () => now,
+    fetchImpl: async () => ++calls === 2 ? new Response('', { status: 429, headers: { 'Retry-After': '1' } }) : release('v1.2.4'),
+  });
+  assert.equal((await check('manual')).status, 'update');
+  assert.equal((await check('manual', { fresh: true })).reason, 'rateLimit');
+  now = 1099;
+  assert.equal((await check('manual')).reason, 'rateLimit');
+  assert.equal(calls, 2);
+  now = 1100;
+  assert.equal((await check('manual')).status, 'update');
+  assert.equal(calls, 3);
+});
+
+test('manual and automatic checks wait for the later GitHub rate limit deadline', async () => {
+  let now = 100_000, calls = 0;
+  const check = createVersionChecker({
+    currentVersion: '1.2.3', getPrefs: () => ({ notifyUpdates: true }), now: () => now,
+    fetchImpl: async () => ++calls === 1 ? new Response('', {
+      status: 403, headers: { 'Retry-After': '90', 'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '220' },
+    }) : release('v1.2.4'),
+  });
+  const limited = { status: 'error', currentVersion: '1.2.3', reason: 'rateLimit', retryAt: 220_000 };
+  assert.deepEqual(await check('manual'), limited);
+  now = 219_999;
+  assert.deepEqual(await check('manual'), limited);
+  assert.equal((await check('auto')).status, 'idle');
+  assert.equal(calls, 1);
+  now++;
+  assert.deepEqual((await Promise.all([check('auto'), check('manual')])).map(r => r.status), ['update', 'update']);
+  assert.equal(calls, 2);
+});
+
+test('GitHub rate limits without a usable deadline back off and eventually wait for a manual check', async () => {
+  let now = 0, calls = 0, answer = () => Response.json({ message: 'You have exceeded a secondary rate limit.' }, {
+    status: 403, headers: { 'X-RateLimit-Remaining': '37', 'X-RateLimit-Reset': '3600' },
+  });
+  const check = createVersionChecker({
+    currentVersion: '1.2.3', getPrefs: () => ({ notifyUpdates: true }), now: () => now,
+    fetchImpl: async () => { calls++; return answer(); },
+  });
+  for (const minutes of [1, 2, 4, 8]) {
+    assert.equal((await check('auto')).status, 'idle');
+    const limited = await check('manual');
+    assert.equal(limited.reason, 'rateLimit');
+    assert.equal(limited.retryAt, now + minutes * 60_000);
+    now = limited.retryAt;
+  }
+  assert.equal((await check('auto')).status, 'idle');
+  assert.equal(calls, 4);
+  answer = () => new Response('', { status: 429, headers: { 'Retry-After': '5' } });
+  assert.equal((await check('manual')).retryAt, now + 5_000);
+  now += 5_000;
+  answer = () => release('v1.2.3');
+  assert.equal((await check('auto')).status, 'current');
+  assert.equal(calls, 6);
 });
 
 test('the version notification setting defaults on for old settings and persists only booleans', t => {
@@ -118,7 +206,8 @@ test('the version notification setting defaults on for old settings and persists
 });
 
 test('sidebar renders all three languages, dismisses automatic prompts and reports manual results even after opt-out', async () => {
-  const ids = ['check', 'notify', 'status', 'notice', 'available', 'release', 'dismiss', 'update', 'update-status'];
+  const ids = ['check', 'notify', 'status', 'notice', 'available', 'release', 'dismiss', 'update',
+    'copy-diagnostics', 'copy-prompt', 'copy-status', 'diagnostics'];
   const nodes = Object.fromEntries(ids.map(id => {
     assert.match(UI_HTML, new RegExp('id="version-' + id + '"'));
     return [id, {
@@ -127,15 +216,21 @@ test('sidebar renders all three languages, dismisses automatic prompts and repor
       addEventListener(_name, fn) { this.click = fn; },
       removeAttribute(name) { delete this[name]; },
       focus() { this.focused = true; },
+      select() { this.selected = this.value; },
     }];
   }));
   assert.doesNotMatch(UI_HTML, /setting-notify-updates|data-setting-card="notifyUpdates"|version-setting-help/);
   assert.ok(UI_HTML.includes(`id="version-number">v${CURRENT_VERSION}</strong>`));
   assert.match(UI_HTML, /class="pv-swatch" id="version-notify" aria-pressed="true" data-active="true"/);
-  assert.match(UI_HTML, /id="version-status" role="status"/);
+  assert.match(UI_HTML, /role="status" aria-atomic="true">\s*<strong id="version-available"><\/strong>\s*<p class="version-feedback" id="version-status">/);
   assert.match(UI_HTML, /id="version-release" target="_blank" rel="noopener noreferrer"/);
+  nodes.release.dataset.releasesUrl = 'https://github.com/Lumidarin/agy-capsule/releases';
   assert.doesNotMatch(UI_HTML, /id="version-instructions"/);
-  const root = { querySelector: key => nodes[key.slice('#version-'.length)] };
+  const copied = [];
+  const root = {
+    querySelector: key => nodes[key.slice('#version-'.length)],
+    ownerDocument: { defaultView: { navigator: { clipboard: { writeText: async text => copied.push(text) } } } },
+  };
   let now = 0;
   const calls = [];
   const saved = [];
@@ -155,7 +250,7 @@ test('sidebar renders all three languages, dismisses automatic prompts and repor
   }, version => {
     installs.push(version);
     return new Promise(resolve => { resolveInstall = resolve; });
-  }, () => now);
+  }, () => now, 'win32 10.0.26100');
   setLanguage('en', true);
   assert.equal(nodes.notify.textContent, 'Update alerts');
   assert.equal(nodes.notify.dataset.active, 'true');
@@ -207,19 +302,49 @@ test('sidebar renders all three languages, dismisses automatic prompts and repor
     reply = { status: 'current' };
     const pending = nodes.check.click();
     assert.equal(nodes.check.textContent, loading);
+    assert.equal(nodes.notice.dataset.state, 'checking');
+    assert.equal(nodes.notice.hidden, false);
     await pending;
     assert.equal(nodes.check.textContent, checkLabel);
-    assert.equal(nodes.status.textContent, latest);
+    assert.equal(nodes.available.textContent, latest);
+    assert.equal(nodes.notice.dataset.state, 'current');
+    assert.equal(nodes.update.hidden, true);
     assert.equal(nodes.check.disabled, false);
   }
-  reply = { status: 'error', reason: 'timeout' };
+  for (const reason of ['timeout', 'network', 'sidecar', 'http', 'noRelease', 'invalidRelease', 'localVersion']) {
+    reply = { status: 'error', reason, httpStatus: 503 };
+    await nodes.check.click();
+    assert.equal(nodes.notice.hidden, false);
+    assert.equal(nodes.notice.dataset.state, 'check-error');
+    assert.equal(nodes.available.textContent, '檢查失敗');
+    assert.ok(nodes.status.textContent);
+    if (reason === 'timeout') assert.equal(nodes.status.textContent, 'GitHub 回應逾時。');
+    assert.equal(nodes.release.hidden, true);
+    assert.equal(nodes['copy-diagnostics'].hidden, true);
+  }
+  reply = { status: 'error', reason: 'rateLimit', retryAt: new Date(2026, 0, 2, 9, 24, 30).getTime() };
   await nodes.check.click();
-  assert.equal(nodes.status.textContent, '檢查失敗：GitHub 回應逾時。');
-  assert.equal(nodes.check.textContent, '檢查更新');
-  for (const [locale, label, progress, failure, retry, manual] of [
-    ['en', 'Update', 'Updating…', /exceeds the size limit/, 'Retry', 'Manual update'],
-    ['zh-CN', '更新', '更新中…', /超过大小限制/, '重试', '手动更新'],
-    ['zh-TW', '更新', '更新中…', /超過大小限制/, '重試', '手動更新'],
+  assert.match(nodes.status.textContent, /09:24:30 後可重試/);
+  assert.equal(nodes.release.hidden, false);
+  assert.equal(nodes.release.textContent, '手動更新');
+  assert.equal(nodes.release.href, nodes.release.dataset.releasesUrl);
+  assert.equal(nodes.update.textContent, '重試');
+  reply = { status: 'current' };
+  await nodes.update.click();
+  assert.equal(nodes.notice.dataset.state, 'current', 'retrying a check does not start an install');
+  assert.deepEqual(installs, []);
+  nodes.dismiss.click();
+  assert.equal(nodes.notice.hidden, true);
+  setLanguage('zh-TW', true);
+  now += 5 * 60_000;
+  reply = { status: 'error', reason: 'rateLimit' };
+  await panel.checkAutomatically();
+  assert.equal(nodes.notice.hidden, true, 'background failures stay quiet');
+  const locked = { status: 'error', reason: 'locked', diagnostics: { step: 'replace', code: 'EBUSY', path: 'plugin.json', restored: true } };
+  for (const [locale, label, progress, error, failure, retry, manual] of [
+    ['en', 'Update', 'Updating…', { status: 'error', reason: 'size' }, /exceeds the size limit/, 'Retry', 'Manual update'],
+    ['zh-CN', '更新', '更新中…', { status: 'error', reason: 'install' }, /^无法完成本地更新。$/, '重试', '手动更新'],
+    ['zh-TW', '更新', '更新中…', locked, /使用中.*已還原/, '重試', '手動更新'],
   ]) {
     setLanguage(locale, false);
     reply = update;
@@ -229,18 +354,37 @@ test('sidebar renders all three languages, dismisses automatic prompts and repor
     assert.equal(nodes.update.textContent, progress);
     assert.equal(nodes.update.disabled, true);
     assert.equal(nodes.dismiss.disabled, true);
+    assert.equal(nodes['copy-diagnostics'].hidden, true);
     const count = installs.length;
     await nodes.update.click();
     assert.equal(installs.length, count, 'duplicate clicks do not launch another install');
-    resolveInstall({ status: 'error', reason: 'size' });
+    resolveInstall(error);
     await pending;
-    assert.match(nodes['update-status'].textContent, failure);
+    assert.match(nodes.status.textContent, failure);
+    assert.equal(nodes.notice.dataset.state, 'error');
     assert.equal(nodes.update.disabled, false);
     assert.equal(nodes.update.textContent, retry);
     assert.equal(nodes.release.textContent, manual);
     assert.equal(nodes.release.href, update.releaseUrl);
   }
+  assert.equal(nodes['copy-diagnostics'].hidden, false);
+  assert.equal(nodes['copy-diagnostics'].textContent, '複製診斷資訊');
+  await nodes['copy-diagnostics'].click();
+  assert.equal(nodes['copy-status'].textContent, '已複製診斷資訊。');
+  assert.equal(nodes.diagnostics.hidden, true);
+  assert.equal(copied.length, 1);
+  assert.deepEqual(JSON.parse(copied[0].slice(copied[0].indexOf('\n') + 1)), {
+    system: 'win32 10.0.26100', currentVersion: '1.0.0', targetVersion: '2.0.0', reason: 'locked', ...locked.diagnostics,
+  });
+  delete root.ownerDocument.defaultView.navigator.clipboard;
+  await nodes['copy-diagnostics'].click();
+  assert.equal(nodes.diagnostics.hidden, false);
+  assert.equal(nodes.diagnostics.focused, true);
+  assert.equal(nodes.diagnostics.selected, copied[0]);
   const retry = nodes.update.click();
+  assert.equal(nodes['copy-diagnostics'].hidden, true);
+  assert.equal(nodes.diagnostics.hidden, true);
+  assert.equal(nodes['copy-status'].textContent, '');
   resolveInstall({ status: 'updated', version: '2.0.0' });
   await retry;
   assert.deepEqual(installs, ['2.0.0', '2.0.0', '2.0.0', '2.0.0']);
@@ -248,7 +392,8 @@ test('sidebar renders all three languages, dismisses automatic prompts and repor
     ['en', 'Update complete. Reloading…'], ['zh-CN', '更新完成，正在重新加载…'], ['zh-TW', '更新完成，正在重新載入…'],
   ]) {
     setLanguage(locale, false);
-    assert.equal(nodes['update-status'].textContent, success);
+    assert.equal(nodes.available.textContent, success);
+    assert.equal(nodes.notice.dataset.state, 'updated');
     assert.equal(nodes.update.disabled, true);
   }
   const keys = Object.keys(dictionaries.en).filter(k => k.startsWith('version') || k.startsWith('notifyUpdates'));
@@ -309,7 +454,7 @@ test('installed SDK serves version checks over loopback only and requires an aut
   assert.equal((await install('GET', token)).code, 405);
   const checkout = await install('POST', token);
   assert.equal(checkout.code, 200);
-  assert.deepEqual(JSON.parse(checkout.body), { status: 'error', reason: 'notInstalled' });
+  assert.deepEqual(JSON.parse(checkout.body), { status: 'error', reason: 'notInstalled', diagnostics: { step: 'inspect' } });
   assert.equal((await send('OPTIONS', { Origin: 'https://example.test' })).headers['access-control-allow-origin'], undefined);
   assert.equal(externalRequests, 0, 'unauthenticated POST and GET never trigger an upstream request');
   for (const headers of headerCases) {
@@ -318,5 +463,7 @@ test('installed SDK serves version checks over loopback only and requires an aut
     assert.equal(response.headers['access-control-allow-origin'], undefined);
     assert.equal(JSON.parse(response.body).latestVersion, '999.0.0');
   }
-  assert.equal(externalRequests, headerCases.length);
+  const requestFresh = await sendVersionRequest(port, 'POST', token, VERSION_ROUTE, { mode: 'manual', fresh: true });
+  assert.equal(requestFresh.code, 200);
+  assert.equal(externalRequests, 1, 'sequential manual requests share the short cache; only the installer can bypass it');
 });

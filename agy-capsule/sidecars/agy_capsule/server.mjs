@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { readdirSync, statSync, existsSync, realpathSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, release } from 'node:os';
 import { join, basename, dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { startDeckInjector } from './deck_injector.mjs';
@@ -19,7 +19,7 @@ import { createUsageHistory } from './usage_history.mjs';
 import { createUsagePresentation } from './usage_ui.mjs';
 import { EFFORT_BAR_CSS, EFFORT_TRACK_MARKUP } from './effort_bar.mjs';
 import { createMotionThemes } from './motion_themes.mjs';
-import { CURRENT_VERSION, VERSION_ROUTE, createVersionChecker } from './version_check.mjs';
+import { CURRENT_VERSION, RELEASES_URL, VERSION_ROUTE, createVersionChecker } from './version_check.mjs';
 import { createVersionPanel } from './version_ui.mjs';
 import { createPluginUpdater, UPDATE_ROUTE } from './version_update.mjs';
 
@@ -27,7 +27,8 @@ const settingsStore = createSettingsStore();
 const checkVersion = createVersionChecker({ getPrefs: () => settingsStore.read() });
 const updatePlugin = createPluginUpdater({ sidecarDirectory: dirname(fileURLToPath(import.meta.url)), checkVersion });
 const cloudTelemetryStore = createCloudTelemetryStore();
-const PANEL_VERSION = 155;
+const PANEL_VERSION = 163;
+const diagnosticSystem = [process.platform, release().match(/^\d+(?:\.\d+)*/)?.[0]].filter(Boolean).join(' ');
 const presentation = createPresentation();
 export function getNotifyText(shortcutState, prefs) {
   const t = presentation.dictionaries[prefs?.settingsLanguage] || presentation.dictionaries['zh-CN'];
@@ -345,14 +346,14 @@ function getActiveConversationIds() {
   return [...active];
 }
 
-async function inspectConversation(convId, exact = false, subagentOnly = false) {
+async function inspectConversation(convId, exact = false, subagentOnly = false, estimate = null) {
   if (exact && !subagentOnly) lastDeckConvId = convId || '';
   if (subagentOnly && !convId) return null;
   return readSelectedConversation(subagentOnly ? convId : lastDeckConvId ?? convId,
-    !subagentOnly && lastDeckConvId === null, subagentOnly);
+    !subagentOnly && lastDeckConvId === null, subagentOnly, estimate);
 }
 
-async function readSelectedConversation(convId, allowLatest, subagentOnly = false) {
+async function readSelectedConversation(convId, allowLatest, subagentOnly = false, estimate = null) {
   touchActiveConversation(convId);
   const dbPath = resolveConversationDb(convId, allowLatest);
   if (subagentOnly && !dbPath) return null;
@@ -364,22 +365,31 @@ async function readSelectedConversation(convId, allowLatest, subagentOnly = fals
         health: null,
         uiVersion: PANEL_VERSION,
         ...cloudSnapshot,
+        ...(estimate && { contextEstimate: estimate }),
         prefs,
         ...await fetchQuota(),
       };
     }
-    return await makeEmptyContextResult(conversationDirs.some(dir => statSync(dir, { throwIfNoEntry: false })?.isDirectory()) ? null : { code: 'S3' });
+    const empty = await makeEmptyContextResult(conversationDirs.some(dir => statSync(dir, { throwIfNoEntry: false })?.isDirectory()) ? null : { code: 'S3' });
+    return estimate ? { ...empty, contextEstimate: estimate } : empty;
   }
   touchActiveConversation(basename(dbPath, '.db'));
 
   const snapshot = conversationCache.read(dbPath, prefs.showTurnMetrics);
   if (subagentOnly && !snapshot?.subagent) return null;
   const health = conversationCache.health(dbPath);
-  if (!snapshot) return await makeEmptyContextResult(health);
+  if (!snapshot) {
+    const empty = await makeEmptyContextResult(health);
+    return estimate ? { ...empty, contextEstimate: estimate } : empty;
+  }
+  // Prefer a newer measured request if SQLite has already caught up, even
+  // when the renderer is still holding the preceding compaction update.
+  const showEstimate = estimate && !snapshot.subagent && !(snapshot.contextRequestIndex > estimate.generatorMetadataIndex);
   return {
     health,
     uiVersion: PANEL_VERSION,
     ...snapshot,
+    ...(showEstimate && { contextEstimate: estimate }),
     prefs,
     ...(subagentOnly ? NO_QUOTA : await fetchQuota()),
   };
@@ -597,6 +607,7 @@ function readConversationSnapshot(dbPath, includeTurnMetrics = true) {
     cachedIn: latest.cachedIn,
     uncachedIn: latest.uncachedIn,
     contextTokens: latest.contextTokens,
+    contextRequestIndex: latest.turn ?? null,
     maxContextTokens: subagent ? latest.maxContextTokens || 0 : maxContextTokens,
     lastStepEpochMs,
     turn0Tokens,
@@ -838,7 +849,7 @@ const PV_CONTEXT_ITEMS = [['turn0', '#d4940a', '14.6K', '3%'], ['read', '#388bfd
 const PV_TURN_ITEMS = [['elapsed', 'turnLabel', '42s'], ['requests', 'turnReqsLabel', '2'], ['thinking', 'turnThinking', '640'], ['write', 'turnWrite', '1.4K']];
 
 const UI_HTML = `<!DOCTYPE html>
-<html>
+<html translate="no">
 <head>
   <meta charset="UTF-8" />
   <meta name="referrer" content="no-referrer" />
@@ -1118,7 +1129,7 @@ const UI_HTML = `<!DOCTYPE html>
     .settings { display: flex; flex-direction: column; gap: 0; width: 100%; }
     .sidebar-content { padding: 12px 14px; }
     .version-panel { max-width: 1120px; margin: 0 auto 10px; font-size: 12.5px; color: var(--foreground, #ebebeb); container: version / inline-size; --version-link: color-mix(in srgb, #2b7fff 48%, var(--foreground, #ebebeb)); }
-    .sidebar-nav:has(.sidebar-tabs:is([data-view="stats"], [data-view="fx"])) + .version-panel :is(.version-line, #version-status) { display: none; }
+    .sidebar-nav:has(.sidebar-tabs:is([data-view="stats"], [data-view="fx"])) + .version-panel .version-line { display: none; }
     .sidebar-nav:has(.sidebar-tabs:is([data-view="stats"], [data-view="fx"])) + .version-panel:not(:has(#version-notice:not([hidden]))) { display: none; }
     .version-line { display: flex; align-items: center; justify-content: space-between; gap: 5px; }
     #version-number { color: var(--muted-foreground, #a2a2a9); font-variant-numeric: tabular-nums; }
@@ -1137,30 +1148,34 @@ const UI_HTML = `<!DOCTYPE html>
     .version-panel :is(button, a):focus-visible { outline: 2px solid #388bfd; outline-offset: 1px; }
     .version-feedback { margin: 0; line-height: 1.5; }
     .version-feedback:not(:empty) { margin-top: 5px; }
-    #version-status[data-state="current"], .version-notice[data-state="updated"] { background: color-mix(in srgb, #22a574 13%, var(--card, #222225)); }
-    #version-status[data-state="current"] { padding: 5px 8px; border-radius: 6px; }
     .version-notice { margin-top: 7px; padding: 8px; border-radius: 8px; border: 1px solid var(--border, #555); background: var(--card, #222225); }
-    .version-notice[data-state="error"] { border-color: color-mix(in srgb, #ec854d 36%, var(--border, #555)); }
+    .version-notice:is([data-state="check-error"], [data-state="error"]) { border-color: color-mix(in srgb, #ec854d 36%, var(--border, #555)); }
     .version-actions { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto auto; align-items: center; gap: 5px; min-height: 36px; }
     .version-icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; color: var(--version-link); background: color-mix(in srgb, #2b7fff 14%, var(--card, #222225)); }
     .version-icon svg, #version-dismiss svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
-    .version-icon svg[data-icon="warning"], .version-notice[data-state="error"] svg[data-icon="download"] { display: none; }
-    .version-notice[data-state="error"] svg[data-icon="warning"] { display: block; }
-    .version-notice[data-state="error"] .version-icon { color: inherit; background: color-mix(in srgb, #ec854d 18%, var(--card, #222225)); }
-    .version-notice[data-state="updated"] .version-actions { display: none; }
-    .version-notice[data-state="updated"] .version-feedback { margin: 0; }
+    .version-icon svg { display: none; }
+    .version-notice:is([data-state="checking"], [data-state="available"], [data-state="updating"]) svg[data-icon="download"],
+    .version-notice:is([data-state="check-error"], [data-state="error"]) svg[data-icon="warning"],
+    .version-notice:is([data-state="current"], [data-state="updated"]) svg[data-icon="success"] { display: block; }
+    .version-notice:is([data-state="check-error"], [data-state="error"]) .version-icon { color: inherit; background: color-mix(in srgb, #ec854d 18%, var(--card, #222225)); }
+    .version-notice:is([data-state="current"], [data-state="updated"]) .version-icon { color: inherit; background: color-mix(in srgb, #22a574 18%, var(--card, #222225)); }
     #version-available { display: block; font-size: 13px; font-weight: 650; line-height: 1.3; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-    #version-release { color: var(--version-link); font-size: 12px; text-decoration: none; }
-    #version-release:hover { text-decoration: underline; text-underline-offset: 2px; }
-    #version-update, #version-dismiss { display: grid; place-items: center; border: 0; border-radius: 6px; padding: 0; font: inherit; cursor: pointer; }
+    .version-link { color: var(--version-link); font-size: 12px; text-decoration: none; }
+    .version-link:hover { text-decoration: underline; text-underline-offset: 2px; }
+    #version-update, #version-dismiss { place-items: center; border: 0; border-radius: 6px; padding: 0; font: inherit; cursor: pointer; }
+    #version-update:not([hidden]), #version-dismiss { display: grid; }
     #version-update { padding: 4px 10px; min-height: 29px; color: #fff; background: #2656d1; font-weight: 600; white-space: nowrap; }
     #version-update:hover:not(:disabled) { background: #1d49b9; }
     #version-dismiss { width: 24px; height: 26px; color: var(--muted-foreground, #a2a2a9); background: transparent; }
     #version-dismiss:hover:not(:disabled) { color: inherit; background: var(--secondary, #303034); }
-    #version-update-status { color: var(--muted-foreground, #a2a2a9); }
+    #version-status { color: var(--muted-foreground, #a2a2a9); overflow-wrap: anywhere; }
+    #version-status:not(:empty) { margin-top: 3px; }
+    .version-links { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 12px; }
+    button.version-link { padding: 0; border: 0; background: transparent; font-family: inherit; line-height: inherit; text-align: start; cursor: pointer; }
+    #version-diagnostics:not([hidden]) { display: block; box-sizing: border-box; width: 100%; margin-top: 5px; padding: 5px; color: inherit; background: transparent; border: 1px solid var(--border, #555); border-radius: 5px; resize: vertical; }
     .version-progress { display: none; height: 3px; overflow: hidden; margin-top: 7px; border-radius: 2px; background: color-mix(in srgb, #2b7fff 18%, transparent); }
     .version-progress::before { content: ""; display: block; width: 35%; height: 100%; border-radius: inherit; background: #2b7fff; animation: version-progress 1.2s ease-in-out infinite alternate; }
-    .version-notice[data-state="updating"] .version-progress { display: block; }
+    .version-notice:is([data-state="checking"], [data-state="updating"]) .version-progress { display: block; }
     @keyframes version-progress { to { transform: translateX(185%); } }
     @media(prefers-reduced-motion: reduce) { .version-progress::before { animation: none; } }
     @container version (max-width: 278px) {
@@ -1169,7 +1184,7 @@ const UI_HTML = `<!DOCTYPE html>
       #version-available { font-size: 12.5px; }
       #version-update { padding-inline: 8px; }
     }
-    @media(pointer:coarse) { .version-controls > .pv-swatch, #version-update, #version-dismiss { min-height: 44px; } #version-dismiss { width: 44px; } #version-release:not([hidden]) { display: inline-flex; align-items: center; min-height: 24px; } }
+    @media(pointer:coarse) { .version-controls > .pv-swatch, #version-update, #version-dismiss { min-height: 44px; } #version-dismiss { width: 44px; } .version-link:not([hidden]) { display: inline-flex; align-items: center; min-height: 24px; } }
     .sidebar-view[hidden] { display: none; }
     .sidebar-nav { position: sticky; top: 0; z-index: 20; margin: -12px -14px 10px; padding: 8px 14px; background: var(--background, #141414); border-bottom: 1px solid color-mix(in srgb, var(--border, rgba(142,142,147,.24)) 65%, transparent); }
     .sidebar-tabs { position: relative; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: center; max-width: 1120px; margin: 0 auto; padding: 2.5px; border-radius: 7px; background: color-mix(in srgb, var(--foreground, #ebebeb) 6%, var(--background, #141414)); border: 1px solid color-mix(in srgb, var(--foreground, #ebebeb) 10%, transparent); }
@@ -1519,6 +1534,7 @@ const UI_HTML = `<!DOCTYPE html>
     body[data-context-marker="dot"][data-context-layout="rows"] .item-row > .dot,
     body[data-turn-marker="dot"][data-turn-layout="rows"] .turn-bar-line { border-radius: 50%; }
     body[data-show-context-breakdown="false"] .panel .list { display: none; }
+    .panel[data-context-estimated] :is(.cache-bar, .list) { display: none; }
     .item-label { order: var(--agy-order-label, 0); }
     .item-k { order: var(--agy-order-value, 1); }
     .item-pct { order: var(--agy-order-percent, 2); }
@@ -1762,22 +1778,30 @@ const UI_HTML = `<!DOCTYPE html>
         <button type="button" class="pv-swatch" id="version-check" aria-describedby="version-status"></button>
       </div>
     </div>
-    <p class="version-feedback" id="version-status" role="status"></p>
     <div class="version-notice" id="version-notice" hidden>
       <div class="version-actions">
         <span class="version-icon" aria-hidden="true">
           <svg data-icon="download" viewBox="0 0 24 24"><path d="M12 3v12m-4-4 4 4 4-4M5 16v3a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3"/></svg>
           <svg data-icon="warning" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.2m0 3.6h.01"/></svg>
+          <svg data-icon="success" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg>
         </span>
         <div>
-          <strong id="version-available" role="status" aria-atomic="true"></strong>
-          <a id="version-release" target="_blank" rel="noopener noreferrer"></a>
+          <div role="status" aria-atomic="true">
+            <strong id="version-available"></strong>
+            <p class="version-feedback" id="version-status"></p>
+          </div>
+          <div class="version-links">
+            <a class="version-link" id="version-release" target="_blank" rel="noopener noreferrer" data-releases-url="${RELEASES_URL}" hidden></a>
+            <button type="button" class="version-link" id="version-copy-diagnostics" hidden></button>
+            <button type="button" class="version-link" id="version-copy-prompt" hidden></button>
+          </div>
         </div>
-        <button type="button" id="version-update" aria-describedby="version-update-status"></button>
+        <button type="button" id="version-update" aria-describedby="version-status" hidden></button>
         <button type="button" id="version-dismiss"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
       </div>
       <div class="version-progress" aria-hidden="true"></div>
-      <p class="version-feedback" id="version-update-status" role="status" aria-atomic="true"></p>
+      <p class="version-feedback" id="version-copy-status" role="status"></p>
+      <textarea id="version-diagnostics" rows="5" readonly hidden></textarea>
     </div>
   </div>
   <aside class="cdp-notice" id="cdp-notice" role="status" aria-atomic="true" hidden>
@@ -1816,6 +1840,7 @@ const UI_HTML = `<!DOCTYPE html>
           <div class="seg" id="seg-read" data-cat="read" style="width: 0%; background: #388bfd"></div>
           <div class="seg" id="seg-think" data-cat="think" style="width: 0%; background: #00b386"></div>
           <div class="seg" id="seg-out" data-cat="write" style="width: 0%; background: #e86a24"></div>
+          <div class="seg" id="seg-estimate" style="width: 0%; background: #8b949e"></div>
         </div>
 
         <div class="list">
@@ -2174,6 +2199,8 @@ const UI_HTML = `<!DOCTYPE html>
         const res = await postApi('${UPDATE_ROUTE}', { version }, AbortSignal.timeout(60_000));
         return res.json();
       },
+      undefined,
+      ${JSON.stringify(diagnosticSystem)},
     );
     let savingSettings = false;
     let settingsEpoch = 0;
@@ -3228,7 +3255,7 @@ const UI_HTML = `<!DOCTYPE html>
       const elapsed = prefs.showTurnMetrics && d.turnMetrics
         ? presentation.turnMetricsText(d.turnMetrics, labels, now).elapsed : '';
       const sig = JSON.stringify([prefsSig, d.contextTokens, d.maxContextTokens, d.cachedIn, d.uncachedIn,
-        d.turn0Tokens, d.totalOutputTokens, d.totalThinkingTokens, generation, d.turnMetrics,
+        d.turn0Tokens, d.totalOutputTokens, d.totalThinkingTokens, d.contextEstimate, generation, d.turnMetrics,
         alert.contextTone, alert.contextTip, elapsed]);
       const statsChanged = sig !== statsSig;
       if (statsChanged) {
@@ -3237,6 +3264,7 @@ const UI_HTML = `<!DOCTYPE html>
         presentation.renderGeneration(panel, generation, labels, prefs);
         presentation.renderTurnMetrics(panel, d.turnMetrics, labels, prefs, now);
         const ctx = presentation.contextBreakdown(d);
+        panel.toggleAttribute('data-context-estimated', ctx.estimated);
 
         document.getElementById('used-pct').textContent = ctx.usedPct;
         document.getElementById('used-fraction').textContent = ctx.usedFrac;
@@ -3245,6 +3273,7 @@ const UI_HTML = `<!DOCTYPE html>
         document.getElementById('seg-out').style.width = ctx.segOutW;
         document.getElementById('seg-think').style.width = ctx.segThinkW;
         document.getElementById('seg-turn0').style.width = ctx.segTurn0W;
+        document.getElementById('seg-estimate').style.width = ctx.segEstimateW;
 
         document.getElementById('val-turn0-k').textContent = ctx.turn0K;
         document.getElementById('val-read-k').textContent = ctx.readK;
@@ -3447,7 +3476,7 @@ export async function startPanel(loadSdk = () => import('sidecar_sdk'), env = pr
     // beside its parent does not. Neither should depend on the last CDP footer.
     const conversationId = data?.conversationId ?? app.config?.conversationId ?? '';
     return {
-      ...await readSelectedConversation(conversationId, false),
+      ...await readSelectedConversation(conversationId, false, false, deckInjector?.contextEstimate(conversationId)),
       deckCdp,
       deckCdpInfo: cdpNotice.info(deckCdp),
       availableModels: deckInjector?.models?.(conversationId) ?? [],

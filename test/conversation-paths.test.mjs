@@ -59,3 +59,26 @@ test('conversation statistics follow the host or the requested chat, never an un
   const direct = await import('../agy-capsule/sidecars/agy_capsule/server.mjs?direct');
   assert.equal(await read(direct, 'same-id'), 44);
 });
+
+test('a compacted chat uses the host estimate until a newer measured request is available', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'agy-compaction-'));
+  const old = process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR;
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+    if (old === undefined) delete process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR;
+    else process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR = old;
+  });
+  process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR = root;
+  const { inspectConversation } = await import('../agy-capsule/sidecars/agy_capsule/server.mjs?compaction');
+  const path = chat(root, 'chat', 99);
+  const estimate = { tokens: 22, limit: 100, generatorMetadataIndex: 0 };
+  const before = await inspectConversation('chat', true, false, estimate);
+  assert.equal(before.contextTokens, 99);
+  assert.deepEqual(before.contextEstimate, estimate);
+  const db = new DatabaseSync(path);
+  try { db.prepare('INSERT INTO gen_metadata VALUES(1, ?)').run(Buffer.from([10, 4, 34, 2, 16, 28])); }
+  finally { db.close(); }
+  const after = await inspectConversation('chat', true, false, estimate);
+  assert.equal(after.contextTokens, 28);
+  assert.equal(after.contextEstimate, undefined);
+});
